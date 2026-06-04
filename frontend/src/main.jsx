@@ -317,7 +317,7 @@ function App() {
 
       const result = await response.json();
       await loadData({ showLoading: false });
-      setMessage(result.symbols.length ? "全部標的已排入背景更新" : "目前沒有可更新的標的");
+      setMessage(result.symbols.length ? "全部數據已排入全量更新" : "目前沒有可更新的標的");
     } catch (requestError) {
       setError(requestError.message);
     }
@@ -582,8 +582,8 @@ function App() {
           className="icon-button"
           type="button"
           onClick={queueRefreshAll}
-          title="排入全部標的更新"
-          aria-label="排入全部標的更新"
+          title="更新全部數據"
+          aria-label="更新全部數據"
         >
           <RefreshCcw size={18} />
         </button>
@@ -598,12 +598,12 @@ function App() {
         <div className="metric">
           <span>自動更新</span>
           <strong>{marketSessionLabel}</strong>
-          <small>股價每 {metadata?.refresh_interval_seconds || BACKGROUND_REFRESH_SECONDS} 秒 · 下次 {formatCountdown(refreshStatus.next_auto_refresh_at, now)}</small>
+          <small>股價每 {metadata?.refresh_interval_seconds || BACKGROUND_REFRESH_SECONDS} 秒 · PE/EPS 每日 09:00 · 下次 {formatCountdown(refreshStatus.next_auto_refresh_at, now)}</small>
         </div>
         <div className="metric">
           <span>目前更新</span>
           <strong>{currentRefreshText}</strong>
-          <small>{metadata?.data_source || "SQLite 快取資料"}</small>
+          <small>主力進出每日更新 · {metadata?.data_source || "SQLite 快取資料"}</small>
         </div>
         <div className="metric">
           <span>最近資料</span>

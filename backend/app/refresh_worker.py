@@ -47,12 +47,20 @@ class RefreshSymbolState:
     finished_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class RefreshJob:
+    symbol: str
+    force_full: bool = False
+
+
 class BackgroundRefreshManager:
     def __init__(self, interval_seconds: int, wantgoo_base_url: str) -> None:
         self.interval_seconds = interval_seconds
         self.wantgoo_base_url = wantgoo_base_url
-        self._queue: asyncio.Queue[str] | None = None
+        self._queue: asyncio.Queue[RefreshJob] | None = None
         self._queued_symbols: set[str] = set()
+        self._queued_force_full: dict[str, bool] = {}
+        self._queued_at: dict[str, datetime] = {}
         self._states: dict[str, RefreshSymbolState] = {}
         self._lock = asyncio.Lock()
         self._stop_event: asyncio.Event | None = None
@@ -82,57 +90,89 @@ class BackgroundRefreshManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def queue_symbol(self, symbol: str, *, create_placeholder: bool = False) -> RefreshSymbolState:
+    async def queue_symbol(
+        self,
+        symbol: str,
+        *,
+        create_placeholder: bool = False,
+        force_full: bool = False,
+    ) -> RefreshSymbolState:
         normalized_symbol = normalize_symbol(symbol)
         if create_placeholder:
             await asyncio.to_thread(_ensure_active_placeholder, normalized_symbol)
 
         now = datetime.now(UTC)
+        enqueue_job = False
+        response_state: RefreshSymbolState | None = None
         async with self._lock:
             self._deleted_symbols.discard(normalized_symbol)
             existing = self._states.get(normalized_symbol)
             if normalized_symbol in self._queued_symbols:
-                return existing or RefreshSymbolState(
+                if force_full:
+                    self._queued_force_full[normalized_symbol] = True
+                    if existing and existing.status == "queued":
+                        existing.message = "Queued for full data refresh."
+                response_state = existing or RefreshSymbolState(
+                    symbol=normalized_symbol,
+                    status="queued",
+                    queued_at=self._queued_at.get(normalized_symbol, now),
+                    message="Already queued for full data refresh." if force_full else "Already queued.",
+                )
+            elif normalized_symbol == self._current_symbol:
+                if force_full:
+                    self._queued_symbols.add(normalized_symbol)
+                    self._queued_force_full[normalized_symbol] = True
+                    self._queued_at[normalized_symbol] = now
+                    enqueue_job = True
+                    response_state = RefreshSymbolState(
+                        symbol=normalized_symbol,
+                        status="queued",
+                        queued_at=now,
+                        started_at=existing.started_at if existing else None,
+                        message="Queued for full data refresh after current run.",
+                    )
+                else:
+                    response_state = existing or RefreshSymbolState(
+                        symbol=normalized_symbol,
+                        status="refreshing",
+                        queued_at=now,
+                        started_at=now,
+                        message="Already refreshing.",
+                    )
+            else:
+                state = RefreshSymbolState(
                     symbol=normalized_symbol,
                     status="queued",
                     queued_at=now,
-                    message="Already queued.",
+                    message="Queued for full data refresh." if force_full else "Queued for background refresh.",
                 )
-            if normalized_symbol == self._current_symbol:
-                return existing or RefreshSymbolState(
-                    symbol=normalized_symbol,
-                    status="refreshing",
-                    queued_at=now,
-                    started_at=now,
-                    message="Already refreshing.",
-                )
+                self._states[normalized_symbol] = state
+                self._queued_symbols.add(normalized_symbol)
+                self._queued_force_full[normalized_symbol] = force_full
+                self._queued_at[normalized_symbol] = now
+                enqueue_job = True
+                response_state = state
 
-            state = RefreshSymbolState(
-                symbol=normalized_symbol,
-                status="queued",
-                queued_at=now,
-                message="Queued for background refresh.",
-            )
-            self._states[normalized_symbol] = state
-            self._queued_symbols.add(normalized_symbol)
-
-        await self._put_queue(normalized_symbol)
-        return state
+        if enqueue_job:
+            await self._put_queue(RefreshJob(normalized_symbol, force_full=force_full))
+        return response_state
 
     async def forget_symbol(self, symbol: str) -> None:
         normalized_symbol = normalize_symbol(symbol)
         async with self._lock:
             self._deleted_symbols.add(normalized_symbol)
             self._queued_symbols.discard(normalized_symbol)
+            self._queued_force_full.pop(normalized_symbol, None)
+            self._queued_at.pop(normalized_symbol, None)
             self._states.pop(normalized_symbol, None)
             if self._current_symbol == normalized_symbol:
                 self._current_symbol = None
 
-    async def queue_active_stocks(self) -> list[RefreshSymbolState]:
+    async def queue_active_stocks(self, *, force_full: bool = False) -> list[RefreshSymbolState]:
         symbols = await asyncio.to_thread(_active_symbols)
         states = []
         for symbol in symbols:
-            states.append(await self.queue_symbol(symbol))
+            states.append(await self.queue_symbol(symbol, force_full=force_full))
         return states
 
     async def snapshot(self) -> dict:
@@ -174,19 +214,19 @@ class BackgroundRefreshManager:
                 ],
             }
 
-    async def _put_queue(self, symbol: str) -> None:
+    async def _put_queue(self, job: RefreshJob) -> None:
         if not self._queue:
             return
-        await self._queue.put(symbol)
+        await self._queue.put(job)
 
     async def _consume_queue(self) -> None:
         if not self._queue:
             return
 
         while True:
-            symbol = await self._queue.get()
+            job = await self._queue.get()
             try:
-                await self._refresh_symbol(symbol)
+                await self._refresh_symbol(job)
             finally:
                 self._queue.task_done()
 
@@ -217,10 +257,13 @@ class BackgroundRefreshManager:
             await self._queue.join()
         await asyncio.to_thread(_log_close_verification_result, started_at, len(states))
 
-    async def _refresh_symbol(self, symbol: str) -> None:
+    async def _refresh_symbol(self, job: RefreshJob) -> None:
         started_at = datetime.now(UTC)
+        symbol = job.symbol
         async with self._lock:
             self._queued_symbols.discard(symbol)
+            force_full = self._queued_force_full.pop(symbol, job.force_full)
+            queued_at = self._queued_at.pop(symbol, None)
             if symbol in self._deleted_symbols:
                 self._states.pop(symbol, None)
                 return
@@ -229,13 +272,19 @@ class BackgroundRefreshManager:
             self._states[symbol] = RefreshSymbolState(
                 symbol=symbol,
                 status="refreshing",
-                message="Refreshing market data.",
-                queued_at=self._states.get(symbol, RefreshSymbolState(symbol, "queued")).queued_at,
+                message="Refreshing all cached data." if force_full else "Refreshing market data.",
+                queued_at=queued_at or self._states.get(symbol, RefreshSymbolState(symbol, "queued")).queued_at,
                 started_at=started_at,
             )
 
         try:
-            message = await asyncio.to_thread(_refresh_symbol_sync, symbol, self.wantgoo_base_url, started_at)
+            message = await asyncio.to_thread(
+                _refresh_symbol_sync,
+                symbol,
+                self.wantgoo_base_url,
+                started_at,
+                force_full=force_full,
+            )
         except Exception as exc:
             finished_at = datetime.now(UTC)
             async with self._lock:
@@ -295,12 +344,6 @@ def _active_stock_exists(symbol: str) -> bool:
                 select(Stock.id).where(Stock.symbol == symbol, Stock.is_active.is_(True))
             )
         )
-
-
-def _is_same_month(value: datetime | None, now: datetime) -> bool:
-    if not value:
-        return False
-    return value.year == now.year and value.month == now.month
 
 
 def _as_aware_utc(value: datetime) -> datetime:
@@ -365,6 +408,20 @@ def _is_same_day(value: datetime | None, now: datetime) -> bool:
     return _to_taipei(value).date() == _to_taipei(now).date()
 
 
+def _is_same_refresh_day(value: datetime | None, now: datetime) -> bool:
+    if not value:
+        return False
+
+    local_value = _to_taipei(value)
+    local_now = _to_taipei(now)
+    if local_value.date() != local_now.date():
+        return False
+
+    if local_now.time() >= MARKET_OPEN_TIME:
+        return local_value.time() >= MARKET_OPEN_TIME
+    return True
+
+
 def _last_close_verification_at() -> datetime | None:
     with SessionLocal() as session:
         finished_at = session.scalar(
@@ -399,16 +456,6 @@ def _log_close_verification_result(started_at: datetime, symbols_count: int) -> 
         session.commit()
 
 
-def _calendar_quarter(value: datetime) -> tuple[int, int]:
-    return value.year, ((value.month - 1) // 3) + 1
-
-
-def _is_same_quarter(value: datetime | None, now: datetime) -> bool:
-    if not value:
-        return False
-    return _calendar_quarter(value) == _calendar_quarter(now)
-
-
 def _refresh_due(symbol: str, now: datetime) -> tuple[bool, bool]:
     with SessionLocal() as session:
         stock = session.scalar(select(Stock).where(Stock.symbol == symbol))
@@ -428,8 +475,8 @@ def _refresh_due(symbol: str, now: datetime) -> tuple[bool, bool]:
             .limit(1)
         )
         return (
-            latest_metric is None or not _is_same_month(latest_metric.pe_updated_at, now),
-            latest_eps_updated_at is None or not _is_same_quarter(latest_eps_updated_at, now),
+            latest_metric is None or not _is_same_refresh_day(latest_metric.pe_updated_at, now),
+            latest_eps_updated_at is None or not _is_same_refresh_day(latest_eps_updated_at, now),
         )
 
 
@@ -468,17 +515,23 @@ def _ensure_active_placeholder(symbol: str) -> None:
         session.commit()
 
 
-def _refresh_symbol_sync(symbol: str, wantgoo_base_url: str, started_at: datetime) -> str:
+def _refresh_symbol_sync(
+    symbol: str,
+    wantgoo_base_url: str,
+    started_at: datetime,
+    *,
+    force_full: bool = False,
+) -> str:
     if not _active_stock_exists(symbol):
         return "標的已刪除，略過背景更新"
 
-    pe_due, eps_due = _refresh_due(symbol, started_at)
-    broker_trading_due = _broker_trading_due(symbol, started_at)
+    pe_due, eps_due = (True, True) if force_full else _refresh_due(symbol, started_at)
+    broker_trading_due = True if force_full else _broker_trading_due(symbol, started_at)
     calculated_at = datetime.now(UTC)
     profile = fetch_stock_profile(symbol, wantgoo_base_url)
     quote = fetch_stock_quote(symbol, wantgoo_base_url)
 
-    messages = ["股價已更新"]
+    messages = ["全量刷新：股價已更新" if force_full else "股價已更新"]
     source_parts = ["WantGoo quote"]
     current_pe = None
     pe_updated_at = None
@@ -500,11 +553,11 @@ def _refresh_symbol_sync(symbol: str, wantgoo_base_url: str, started_at: datetim
                 source_parts.append("cached PE")
             else:
                 pe_updated_at = calculated_at
-                messages.append("PE 已按月更新")
-                source_parts.append("TWSE monthly PE")
+                messages.append("PE 已按日更新")
+                source_parts.append("TWSE daily PE")
     else:
-        messages.append("PE 沿用本月快取")
-        source_parts.append("cached monthly PE")
+        messages.append("PE 沿用今日快取")
+        source_parts.append("cached daily PE")
 
     if profile.asset_type == "ETF":
         pass
@@ -516,11 +569,11 @@ def _refresh_symbol_sync(symbol: str, wantgoo_base_url: str, started_at: datetim
             source_parts.append("cached EPS")
         else:
             eps_updated_at = calculated_at
-            messages.append("EPS 已按季更新")
-            source_parts.append("FinMind quarterly EPS")
+            messages.append("EPS 已按日更新")
+            source_parts.append("FinMind daily EPS")
     else:
-        messages.append("EPS 沿用本季快取")
-        source_parts.append("cached quarterly EPS")
+        messages.append("EPS 沿用今日快取")
+        source_parts.append("cached daily EPS")
 
     if current_pe is None and eps_rows:
         current_pe = derive_pe(quote.current_price, eps_rows)

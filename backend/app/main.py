@@ -314,7 +314,7 @@ async def refresh_status() -> RefreshStatusResponse:
 
 @app.post("/api/stocks/refresh", response_model=RefreshQueueResponse, status_code=status.HTTP_202_ACCEPTED)
 async def refresh_all_stocks() -> RefreshQueueResponse:
-    states = await refresh_manager.queue_active_stocks()
+    states = await refresh_manager.queue_active_stocks(force_full=True)
     queued_at = datetime.now(UTC)
     symbols = [state.symbol for state in states]
     if states:
@@ -324,7 +324,7 @@ async def refresh_all_stocks() -> RefreshQueueResponse:
         status="queued" if symbols else "idle",
         symbols=symbols,
         queued_at=queued_at,
-        message="Active stocks queued for background refresh." if symbols else "No active stocks to refresh.",
+        message="Active stocks queued for full data refresh." if symbols else "No active stocks to refresh.",
     )
 
 
