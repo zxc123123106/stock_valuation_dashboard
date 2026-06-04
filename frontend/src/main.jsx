@@ -902,8 +902,8 @@ const StockCard = React.forwardRef(function StockCard(
       {!isEtf && (
         <div className="valuation-table">
           <div className="valuation-row head">
+            <span></span>
             <span>EPS</span>
-            <span>數值</span>
             <span>估算股價</span>
             <span>現值估算</span>
             <span>成本估算</span>
