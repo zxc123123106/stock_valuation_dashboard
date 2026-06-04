@@ -1,0 +1,29 @@
+.DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env
+frontend/.env.local
+
+# Local data
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Logs
+*.log
