@@ -1,23 +1,23 @@
-# Stock Valuation Dashboard
+# 股票估值統計看板
 
-Local-only FastAPI + React MVP for comparing current stock prices against estimates derived from EPS and current P/E, with simple buy-price tracking.
+這是一個本機使用的 FastAPI + React 看板，用 SQLite 快取台股股票與 ETF 資料，提供買入價追蹤、估值比較與 Yahoo 主力進出資訊。
 
-The app is still split into two local services:
+專案分成兩個本機服務：
 
-- Backend API: FastAPI, SQLite, runs on `http://127.0.0.1:8000`
-- Frontend dashboard: React/Vite, runs on `http://127.0.0.1:5173`
+- 後端 API：FastAPI + SQLite，預設執行於 `http://127.0.0.1:8000`
+- 前端看板：React/Vite，預設執行於 `http://127.0.0.1:5173`，也可能使用 Vite 自動分配的其他 port，例如 `5174`
 
-For day-to-day local operations, see [`docs/LOCAL_OPERATIONS.md`](docs/LOCAL_OPERATIONS.md). Backend startup and refresh operations are handled by the user locally.
+## 系統需求
 
-## Local Setup
+- Python 3.13 或相容的 Python 3.x
+- Node.js 24 LTS 或更新版本
+- 可連線到 WantGoo、TWSE、FinMind 與 Yahoo 主力進出資料來源
 
-Node 24 LTS is recommended for the frontend. The project also accepts newer local Node versions:
+## 安裝
 
-```bash
-nvm use
-```
+建立 Python 虛擬環境並安裝後端依賴。
 
-Create or activate the Python virtual environment:
+macOS / bash:
 
 ```bash
 python3 -m venv .venv
@@ -25,81 +25,245 @@ source .venv/bin/activate
 pip install -r backend/requirements.txt
 ```
 
-Optional local environment files can be created from the examples when you are ready to run locally:
+Windows cmd:
+
+```bat
+py -3 -m venv .venv
+.venv\Scripts\activate.bat
+pip install -r backend\requirements.txt
+```
+
+如果需要本機環境設定，可以複製範例檔。
+
+macOS / bash:
 
 ```bash
 cp .env.example .env
 cp frontend/.env.example frontend/.env
 ```
 
-Install frontend dependencies:
+Windows cmd:
+
+```bat
+copy .env.example .env
+copy frontend\.env.example frontend\.env
+```
+
+安裝前端依賴。
+
+macOS / bash 與 Windows cmd:
 
 ```bash
 cd frontend
 npm install
 ```
 
-## Run
+## 啟動後端
 
-Backend:
+在專案根目錄啟動後端。
+
+macOS / bash:
 
 ```bash
 source .venv/bin/activate
-uvicorn backend.app.main:app --reload
+python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Frontend:
+Windows cmd:
+
+```bat
+.venv\Scripts\activate.bat
+python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+```
+
+停止後端時，在同一個終端機按 `Control + C`。
+
+後端會建立 `data/stock_valuation.sqlite3`。如果本機資料庫是空的，會先建立 `2330` 的初始範例資料。
+
+## 啟動前端
+
+另開一個終端機。
+
+macOS / bash 與 Windows cmd:
 
 ```bash
 cd frontend
-npm run dev
+npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-The backend creates `data/stock_valuation.sqlite3` and seeds a local snapshot for TSMC `2330` when the local database is empty.
+開啟：
 
-Refresh stock or ETF data from the local backend. The backend updates SQLite by combining WantGoo quote data, TWSE OpenAPI P/E data, FinMind quarterly EPS data, and Yahoo broker-trading data:
+```text
+http://127.0.0.1:5173/
+```
+
+如果 Vite 顯示其他可用 port，例如 `5174`，請開啟終端機顯示的實際網址。
+
+## 健康檢查
+
+macOS / bash:
+
+```bash
+curl http://127.0.0.1:8000/api/health
+```
+
+Windows cmd:
+
+```bat
+curl http://127.0.0.1:8000/api/health
+```
+
+正常會看到：
+
+```json
+{"status":"ok","app_env":"development","database":"sqlite","api_version":"0.1.0"}
+```
+
+## 手動更新
+
+手動更新會把任務排入背景佇列，API 會立即回應，不會等待外部資料同步完成。
+
+更新單一標的：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/stocks/2330/refresh
 ```
 
-The refresh API queues a background cache update and returns immediately. While the backend is running, active stock prices are refreshed in the background every 60 seconds, P/E is refreshed monthly, EPS is refreshed quarterly, broker trading is refreshed daily, and the frontend reads from SQLite cache.
+更新全部 active 標的：
 
-ETF support is intentionally simple in this version: ETF cards track quote price, buy price, and unrealized per-share profit/loss, but they do not show P/E, EPS, valuation rows, or broker trading.
+```bash
+curl -X POST http://127.0.0.1:8000/api/stocks/refresh
+```
+
+查看背景更新狀態：
+
+```bash
+curl http://127.0.0.1:8000/api/refresh/status
+```
+
+查看目前看板上的 active 標的：
+
+```bash
+curl http://127.0.0.1:8000/api/stocks
+```
+
+## 自動更新規則
+
+前端每 5 秒讀取 SQLite 快取，不會等待外部 API，因此頁面不會因資料同步而整頁卡住。
+
+後端自動更新只在台北時間平日 `09:00` 到 `14:00` 執行。
+
+- 股票與 ETF 股價每 `BACKGROUND_REFRESH_SECONDS` 更新一次，預設為 `60` 秒。
+- 主力進出每日更新一次，股票與 ETF 都會抓取。
+- 本益比每月更新一次，只適用股票。
+- EPS 每季更新一次，只適用股票。
+- ETF 顯示股價、買入價、每股未實現損益與主力進出；不顯示本益比、EPS 或估值列。
+- `14:00` 後，後端會在每個平日做一次收盤補抓，確認最後一筆快取。
+- 週末不會自動更新。
+- 手動更新任何時間都可以使用。
+- 目前不判斷台灣國定假日，因此平日假日仍可能嘗試更新。
+
+如果外部資料來源暫時失敗，後端會盡量保留既有快取，並把失敗原因寫入 `crawler_logs`。
+
+## 看板操作
+
+- 在輸入框輸入代號並按 `加入/更新`，可以新增或更新標的。
+- 每檔標的可以輸入買入價，用來顯示每股未實現損益。
+- 按 `賣出` 會清除該檔標的目前買入價。
+- 可以拖曳卡片左側排序把手調整順序，也可以用卡片右上角的上移/下移箭頭微調。
+- 刪除標的是永久刪除，會移除該標的、持倉、股價快取、EPS、估值、主力進出與該標的更新紀錄。
+- 重新加入同一個代號時，會建立新的本機快取。
+
+現值估算公式為 `(估算股價 - 現價) / 現價 * 100`。成本估算公式為 `(估算股價 - 買入價) / 買入價 * 100`。未實現損益公式為 `(現價 - 買入價) / 買入價 * 100`。
 
 ## API
 
 - `GET /api/health`
 - `GET /api/metadata`
 - `GET /api/stocks`
-- `GET /api/stocks/2330`
-- `GET /api/stocks/2330/valuations`
+- `GET /api/stocks/{symbol}`
+- `GET /api/stocks/{symbol}/valuations`
 - `GET /api/refresh/status`
 - `POST /api/stocks/refresh`
-- `POST /api/stocks/2330/refresh`
+- `POST /api/stocks/{symbol}/refresh`
 - `POST /api/stocks/reorder`
-- `PUT /api/stocks/2330/position`
-- `DELETE /api/stocks/2330/position`
-- `DELETE /api/stocks/2330`
+- `PUT /api/stocks/{symbol}/position`
+- `DELETE /api/stocks/{symbol}/position`
+- `DELETE /api/stocks/{symbol}`
 
-Deleting a stock permanently removes that symbol and its local SQLite cache rows. Re-adding the same symbol creates a fresh local cache.
+## 連接埠被佔用
 
-## Environment
+查詢 port 使用狀態。
 
-Tracked examples:
+macOS / bash:
 
-- `.env.example` for backend and shared settings
-- `frontend/.env.example` for Vite settings
+```bash
+lsof -nP -iTCP:8000 -sTCP:LISTEN
+lsof -nP -iTCP:5173 -sTCP:LISTEN
+```
 
-Ignored local files:
+Windows cmd:
+
+```bat
+netstat -ano | findstr :8000
+netstat -ano | findstr :5173
+```
+
+確認 PID 是本專案舊的本機開發服務後，可以停止它。
+
+macOS / bash:
+
+```bash
+kill <PID>
+```
+
+Windows cmd:
+
+```bat
+taskkill /PID <PID> /F
+```
+
+如果不確定該 port 是誰在使用，不要直接停止，先確認來源。
+
+## 驗證
+
+後端語法檢查。
+
+macOS / bash:
+
+```bash
+source .venv/bin/activate
+python -m compileall backend
+```
+
+Windows cmd:
+
+```bat
+.venv\Scripts\activate.bat
+python -m compileall backend
+```
+
+前端 production build。
+
+macOS / bash 與 Windows cmd:
+
+```bash
+cd frontend
+npm run build
+```
+
+## 環境設定
+
+已追蹤的範例檔：
+
+- `.env.example`：後端與共用設定
+- `frontend/.env.example`：Vite API base URL
+
+本機忽略檔案：
 
 - `.env`
 - `frontend/.env`
 - `.venv/`
 - `data/*.sqlite3`
 
-Local development uses SQLite. PostgreSQL, Docker, cloud deployment, and cross-device hosting are intentionally out of scope.
-
-Current EPS types are `TTM` and `LAST_YEAR`.
-
-The dashboard shows current-value estimate as `(estimated price - current price) / current price * 100`; positive values mean the estimate is above the current price. Cost estimate uses `(estimated price - buy price) / buy price * 100`, and unrealized profit/loss uses `(current price - buy price) / buy price * 100`.
+本機開發使用 SQLite。PostgreSQL、Docker、雲端部署與跨裝置 hosting 目前都不在範圍內。

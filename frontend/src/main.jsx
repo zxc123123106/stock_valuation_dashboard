@@ -54,6 +54,13 @@ const REFRESH_STATUS_LABELS = {
   failed: "更新失敗",
 };
 
+const MARKET_SESSION_LABELS = {
+  open: "盤中更新中",
+  pre_open: "開盤外停止",
+  post_close: "開盤外停止",
+  weekend: "週末停止",
+};
+
 function formatNumber(value, digits = 2) {
   return new Intl.NumberFormat("zh-TW", {
     minimumFractionDigits: digits,
@@ -555,6 +562,9 @@ function App() {
   const activeStock = orderedStocks.find((stock) => stock.symbol === activeDragSymbol);
   const latestDataTime = latestMetricTime(stocks);
   const valuationCount = stocks.reduce((total, stock) => total + stock.valuations.length, 0);
+  const refreshWindow = refreshStatus.refresh_window || metadata?.refresh_window || "平日 09:00-14:00 Asia/Taipei";
+  const marketSessionLabel = MARKET_SESSION_LABELS[refreshStatus.market_session] || "開盤外停止";
+  const lastCloseVerification = refreshStatus.last_close_verification_at || metadata?.last_close_verification_at;
   const currentRefreshText = refreshStatus.current_symbol
     ? refreshStatus.current_symbol
     : refreshStatus.queue_length
@@ -583,7 +593,12 @@ function App() {
         <div className="metric">
           <span>背景快取</span>
           <strong>{REFRESH_STATUS_LABELS[refreshStatus.status] || refreshStatus.status || "待命"}</strong>
-          <small>股價每 {metadata?.refresh_interval_seconds || BACKGROUND_REFRESH_SECONDS} 秒 · PE 每月 · EPS 每季</small>
+          <small>{refreshWindow} · 手動更新不限時</small>
+        </div>
+        <div className="metric">
+          <span>自動更新</span>
+          <strong>{marketSessionLabel}</strong>
+          <small>股價每 {metadata?.refresh_interval_seconds || BACKGROUND_REFRESH_SECONDS} 秒 · 下次 {formatCountdown(refreshStatus.next_auto_refresh_at, now)}</small>
         </div>
         <div className="metric">
           <span>目前更新</span>
@@ -591,14 +606,9 @@ function App() {
           <small>{metadata?.data_source || "SQLite 快取資料"}</small>
         </div>
         <div className="metric">
-          <span>下次同步</span>
-          <strong>{formatCountdown(refreshStatus.next_auto_refresh_at, now)}</strong>
-          <small>上次完成 {formatDate(refreshStatus.last_refresh_finished_at)}</small>
-        </div>
-        <div className="metric">
           <span>最近資料</span>
           <strong>{formatDate(latestDataTime)}</strong>
-          <small>{stocks.length} 檔標的 · {valuationCount} 筆估值</small>
+          <small>{stocks.length} 檔標的 · {valuationCount} 筆估值 · 收盤補抓 {formatDate(lastCloseVerification)}</small>
         </div>
       </section>
 
@@ -898,6 +908,16 @@ const StockCard = React.forwardRef(function StockCard(
           <small>{formatOptionalSignedNumber(stock.position?.unrealized_profit_loss)}</small>
         </div>
       </div>
+
+      {isEtf && (
+        <div className="valuation-table broker-only">
+          <BrokerTradingDisclosure
+            brokerTrading={stock.broker_trading}
+            expanded={brokerTradingExpanded}
+            onToggle={() => setBrokerTradingExpanded((current) => !current)}
+          />
+        </div>
+      )}
 
       {!isEtf && (
         <div className="valuation-table">

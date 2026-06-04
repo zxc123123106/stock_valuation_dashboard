@@ -19,8 +19,12 @@ class MetadataResponse(BaseModel):
     valuations_count: int
     refresh_status: str | None = None
     refresh_interval_seconds: int | None = None
+    auto_refresh_enabled: bool | None = None
+    market_session: str | None = None
+    refresh_window: str | None = None
     next_auto_refresh_at: datetime | None = None
     last_refresh_finished_at: datetime | None = None
+    last_close_verification_at: datetime | None = None
 
 
 class StockMetricResponse(BaseModel):
@@ -110,8 +114,12 @@ class RefreshStatusResponse(BaseModel):
     status: str
     current_symbol: str | None = None
     queue_length: int
+    auto_refresh_enabled: bool = False
+    market_session: str = "closed"
+    refresh_window: str = ""
     next_auto_refresh_at: datetime | None = None
     last_refresh_finished_at: datetime | None = None
+    last_close_verification_at: datetime | None = None
     symbols: list[RefreshSymbolStateResponse]
 
 

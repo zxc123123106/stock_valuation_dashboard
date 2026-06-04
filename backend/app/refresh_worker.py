@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
 from .database import (
+    CrawlerLog,
     SessionLocal,
     Stock,
     StockBrokerTrading,
@@ -26,6 +28,13 @@ from .wantgoo import (
     normalize_symbol,
 )
 from .yahoo_broker import fetch_broker_trading
+
+
+TAIPEI_TZ = ZoneInfo("Asia/Taipei")
+MARKET_OPEN_TIME = time(9, 0)
+MARKET_AUTO_REFRESH_END_TIME = time(14, 0)
+REFRESH_WINDOW_LABEL = "平日 09:00-14:00 Asia/Taipei"
+CLOSE_VERIFICATION_JOB_NAME = "market_close_verification"
 
 
 @dataclass
@@ -62,7 +71,6 @@ class BackgroundRefreshManager:
         self._stop_event = asyncio.Event()
         self._consumer_task = asyncio.create_task(self._consume_queue(), name="stock-refresh-consumer")
         self._ticker_task = asyncio.create_task(self._run_ticker(), name="stock-refresh-ticker")
-        await self.queue_active_stocks()
 
     async def stop(self) -> None:
         if self._stop_event:
@@ -128,6 +136,10 @@ class BackgroundRefreshManager:
         return states
 
     async def snapshot(self) -> dict:
+        now = datetime.now(UTC)
+        auto_refresh_enabled = _auto_refresh_enabled(now)
+        next_auto_refresh_at = _next_auto_refresh_at(now, self.interval_seconds)
+        last_close_verification_at = await asyncio.to_thread(_last_close_verification_at)
         async with self._lock:
             status = "idle"
             if self._current_symbol:
@@ -139,8 +151,12 @@ class BackgroundRefreshManager:
                 "status": status,
                 "current_symbol": self._current_symbol,
                 "queue_length": len(self._queued_symbols),
-                "next_auto_refresh_at": self._next_auto_refresh_at,
+                "auto_refresh_enabled": auto_refresh_enabled,
+                "market_session": _market_session(now),
+                "refresh_window": REFRESH_WINDOW_LABEL,
+                "next_auto_refresh_at": self._next_auto_refresh_at if auto_refresh_enabled and self._next_auto_refresh_at else next_auto_refresh_at,
                 "last_refresh_finished_at": self._last_refresh_finished_at,
+                "last_close_verification_at": last_close_verification_at,
                 "symbols": [
                     {
                         "symbol": state.symbol,
@@ -179,14 +195,27 @@ class BackgroundRefreshManager:
             return
 
         while True:
+            now = datetime.now(UTC)
             async with self._lock:
-                self._next_auto_refresh_at = datetime.now(UTC) + timedelta(seconds=self.interval_seconds)
+                self._next_auto_refresh_at = _next_auto_refresh_at(now, self.interval_seconds)
+
+            if _auto_refresh_enabled(now):
+                await self.queue_active_stocks()
+            elif await asyncio.to_thread(_close_verification_due, now):
+                await self._run_close_verification()
 
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self.interval_seconds)
                 return
             except TimeoutError:
-                await self.queue_active_stocks()
+                continue
+
+    async def _run_close_verification(self) -> None:
+        started_at = datetime.now(UTC)
+        states = await self.queue_active_stocks()
+        if self._queue:
+            await self._queue.join()
+        await asyncio.to_thread(_log_close_verification_result, started_at, len(states))
 
     async def _refresh_symbol(self, symbol: str) -> None:
         started_at = datetime.now(UTC)
@@ -274,10 +303,100 @@ def _is_same_month(value: datetime | None, now: datetime) -> bool:
     return value.year == now.year and value.month == now.month
 
 
+def _as_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _to_taipei(value: datetime) -> datetime:
+    return _as_aware_utc(value).astimezone(TAIPEI_TZ)
+
+
+def _is_weekday(value: datetime) -> bool:
+    return _to_taipei(value).weekday() < 5
+
+
+def _auto_refresh_enabled(now: datetime) -> bool:
+    local_now = _to_taipei(now)
+    return (
+        local_now.weekday() < 5
+        and MARKET_OPEN_TIME <= local_now.time() < MARKET_AUTO_REFRESH_END_TIME
+    )
+
+
+def _market_session(now: datetime) -> str:
+    local_now = _to_taipei(now)
+    if local_now.weekday() >= 5:
+        return "weekend"
+    if local_now.time() < MARKET_OPEN_TIME:
+        return "pre_open"
+    if local_now.time() < MARKET_AUTO_REFRESH_END_TIME:
+        return "open"
+    return "post_close"
+
+
+def _next_market_open(now: datetime) -> datetime:
+    local_now = _to_taipei(now)
+    candidate = local_now.replace(
+        hour=MARKET_OPEN_TIME.hour,
+        minute=MARKET_OPEN_TIME.minute,
+        second=0,
+        microsecond=0,
+    )
+    if local_now.weekday() < 5 and local_now < candidate:
+        return candidate.astimezone(UTC)
+
+    candidate = candidate + timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate = candidate + timedelta(days=1)
+    return candidate.astimezone(UTC)
+
+
+def _next_auto_refresh_at(now: datetime, interval_seconds: int) -> datetime:
+    if _auto_refresh_enabled(now):
+        return _as_aware_utc(now) + timedelta(seconds=interval_seconds)
+    return _next_market_open(now)
+
+
 def _is_same_day(value: datetime | None, now: datetime) -> bool:
     if not value:
         return False
-    return value.date() == now.date()
+    return _to_taipei(value).date() == _to_taipei(now).date()
+
+
+def _last_close_verification_at() -> datetime | None:
+    with SessionLocal() as session:
+        finished_at = session.scalar(
+            select(CrawlerLog.finished_at)
+            .where(
+                CrawlerLog.job_name == CLOSE_VERIFICATION_JOB_NAME,
+                CrawlerLog.status == "SUCCESS",
+            )
+            .order_by(CrawlerLog.finished_at.desc())
+            .limit(1)
+        )
+    return _as_aware_utc(finished_at) if finished_at else None
+
+
+def _close_verification_due(now: datetime) -> bool:
+    if not _is_weekday(now) or _to_taipei(now).time() < MARKET_AUTO_REFRESH_END_TIME:
+        return False
+
+    last_finished_at = _last_close_verification_at()
+    return not _is_same_day(last_finished_at, now)
+
+
+def _log_close_verification_result(started_at: datetime, symbols_count: int) -> None:
+    with SessionLocal() as session:
+        log_crawler_result(
+            session=session,
+            job_name=CLOSE_VERIFICATION_JOB_NAME,
+            status="SUCCESS",
+            message=f"Close verification refreshed {symbols_count} active symbols.",
+            started_at=started_at,
+        )
+        session.commit()
 
 
 def _calendar_quarter(value: datetime) -> tuple[int, int]:
@@ -317,7 +436,7 @@ def _refresh_due(symbol: str, now: datetime) -> tuple[bool, bool]:
 def _broker_trading_due(symbol: str, now: datetime) -> bool:
     with SessionLocal() as session:
         stock = session.scalar(select(Stock).where(Stock.symbol == symbol))
-        if not stock or stock.asset_type == "ETF":
+        if not stock:
             return False
 
         latest_broker_trading = session.scalar(
@@ -409,9 +528,7 @@ def _refresh_symbol_sync(symbol: str, wantgoo_base_url: str, started_at: datetim
         messages.append("PE 已由最新 EPS 推算")
         source_parts.append("derived PE")
 
-    if profile.asset_type == "ETF":
-        pass
-    elif broker_trading_due:
+    if broker_trading_due:
         try:
             broker_trading = fetch_broker_trading(symbol)
         except Exception as exc:
@@ -441,7 +558,7 @@ def _refresh_symbol_sync(symbol: str, wantgoo_base_url: str, started_at: datetim
                 source=source,
                 calculated_at=calculated_at,
             )
-            if broker_trading and stock.asset_type != "ETF":
+            if broker_trading:
                 apply_broker_trading_snapshot(session, stock, broker_trading)
             log_crawler_result(
                 session=session,

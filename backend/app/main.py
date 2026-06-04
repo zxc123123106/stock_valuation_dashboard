@@ -248,7 +248,7 @@ def _stock_response(stock: Stock, session: Session) -> StockResponse:
         if metric
         else None,
         position=_position_response(position, metric),
-        broker_trading=_broker_trading_response(stock, session) if stock.asset_type != "ETF" else None,
+        broker_trading=_broker_trading_response(stock, session),
         valuations=[_valuation_response(valuation, position.buy_price if position else None) for valuation in valuations],
     )
 
@@ -274,8 +274,12 @@ async def metadata(session: Session = Depends(get_session)) -> MetadataResponse:
         valuations_count=_active_valuations_count(session),
         refresh_status=refresh_status["status"],
         refresh_interval_seconds=settings.background_refresh_seconds,
+        auto_refresh_enabled=refresh_status["auto_refresh_enabled"],
+        market_session=refresh_status["market_session"],
+        refresh_window=refresh_status["refresh_window"],
         next_auto_refresh_at=refresh_status["next_auto_refresh_at"],
         last_refresh_finished_at=refresh_status["last_refresh_finished_at"],
+        last_close_verification_at=refresh_status["last_close_verification_at"],
     )
 
 
