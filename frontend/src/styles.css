@@ -352,6 +352,8 @@ h1 {
 }
 
 .status-pill.queued,
+.status-pill.retry_wait,
+.status-pill.running,
 .status-pill.refreshing {
   border-color: rgba(198, 161, 91, 0.52);
   background: var(--gold-soft);
@@ -370,6 +372,7 @@ h1 {
   color: var(--danger);
 }
 
+.status-pill.running svg,
 .status-pill.refreshing svg {
   animation: spin 900ms linear infinite;
 }

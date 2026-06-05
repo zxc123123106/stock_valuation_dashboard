@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Generator
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, create_engine, delete, func, select, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, create_engine, delete, func, or_, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -18,6 +18,7 @@ settings = get_settings()
 SUPPORTED_EPS_TYPES = ("TTM", "LAST_YEAR")
 LEGACY_DEMO_SOURCES = {"wantgoo-demo"}
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
+CRAWLER_LOG_CLEANUP_KEY = "crawler_logs_last_cleanup_at"
 
 
 def _resolve_database_url(database_url: str) -> str:
@@ -197,6 +198,31 @@ class CrawlerLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
+class StockRefreshState(Base):
+    __tablename__ = "stock_refresh_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(24), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="idle")
+    message: Mapped[str] = mapped_column(String(500), default="")
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class AppMaintenanceState(Base):
+    __tablename__ = "app_maintenance_state"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
 def get_session() -> Generator[Session, None, None]:
     with SessionLocal() as session:
         yield session
@@ -210,6 +236,7 @@ def init_database() -> None:
         backfill_display_order(session)
         remove_unsupported_eps(session)
         seed_demo_data(session)
+    run_startup_maintenance()
 
 
 def ensure_stock_display_order_column() -> None:
@@ -647,6 +674,59 @@ def log_crawler_result(
             finished_at=finished_at or datetime.now(UTC),
         )
     )
+
+
+def run_startup_maintenance() -> None:
+    reset_interrupted_refresh_states()
+    cleanup_crawler_logs_if_due()
+
+
+def reset_interrupted_refresh_states() -> None:
+    now = datetime.now(UTC)
+    with SessionLocal() as session:
+        states = session.scalars(
+            select(StockRefreshState).where(StockRefreshState.status.in_(("queued", "running", "refreshing")))
+        ).all()
+        for state in states:
+            state.status = "failed"
+            state.message = "前次更新未完成，使用快取"
+            state.last_error = "Backend restarted before the refresh finished."
+            state.finished_at = now
+            state.updated_at = now
+        if states:
+            session.commit()
+
+
+def cleanup_crawler_logs_if_due(*, force: bool = False, now: datetime | None = None) -> bool:
+    current_time = now or datetime.now(UTC)
+    with SessionLocal() as session:
+        state = session.get(AppMaintenanceState, CRAWLER_LOG_CLEANUP_KEY)
+        last_cleanup_at = _parse_maintenance_datetime(state.value) if state and state.value else None
+        interval = timedelta(hours=settings.crawler_log_cleanup_interval_hours)
+        if not force and last_cleanup_at and current_time - last_cleanup_at < interval:
+            return False
+
+        cutoff = current_time - timedelta(days=settings.crawler_log_retention_days)
+        session.execute(
+            delete(CrawlerLog).where(or_(CrawlerLog.created_at < cutoff, CrawlerLog.started_at < cutoff))
+        )
+        if not state:
+            state = AppMaintenanceState(key=CRAWLER_LOG_CLEANUP_KEY)
+            session.add(state)
+        state.value = current_time.isoformat()
+        state.updated_at = current_time
+        session.commit()
+        return True
+
+
+def _parse_maintenance_datetime(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def ping_database() -> bool:

@@ -14,18 +14,21 @@ from .database import (
     StockBrokerTrading,
     StockEPS,
     StockMetric,
+    StockRefreshState,
     apply_broker_trading_snapshot,
     apply_layered_stock_refresh,
+    cleanup_crawler_logs_if_due,
     log_crawler_result,
     next_display_order,
 )
+from .histock_eps import fetch_stock_eps
 from .wantgoo import (
     derive_pe,
-    fetch_stock_eps,
     fetch_stock_pe,
     fetch_stock_profile,
     fetch_stock_quote,
     normalize_symbol,
+    StockProfileSnapshot,
 )
 from .yahoo_broker import fetch_broker_trading
 
@@ -35,6 +38,7 @@ MARKET_OPEN_TIME = time(9, 0)
 MARKET_AUTO_REFRESH_END_TIME = time(14, 0)
 REFRESH_WINDOW_LABEL = "平日 09:00-14:00 Asia/Taipei"
 CLOSE_VERIFICATION_JOB_NAME = "market_close_verification"
+RETRY_BACKOFF_SECONDS = (60, 180, 300, 900)
 
 
 @dataclass
@@ -102,8 +106,15 @@ class BackgroundRefreshManager:
             await asyncio.to_thread(_ensure_active_placeholder, normalized_symbol)
 
         now = datetime.now(UTC)
+        bypass_backoff = create_placeholder or force_full
+        if not bypass_backoff:
+            retry_wait_state = await asyncio.to_thread(_retry_wait_state, normalized_symbol, now)
+            if retry_wait_state:
+                return retry_wait_state
+
         enqueue_job = False
         response_state: RefreshSymbolState | None = None
+        queued_record_message: str | None = None
         async with self._lock:
             self._deleted_symbols.discard(normalized_symbol)
             existing = self._states.get(normalized_symbol)
@@ -112,6 +123,7 @@ class BackgroundRefreshManager:
                     self._queued_force_full[normalized_symbol] = True
                     if existing and existing.status == "queued":
                         existing.message = "Queued for full data refresh."
+                    queued_record_message = "Queued for full data refresh."
                 response_state = existing or RefreshSymbolState(
                     symbol=normalized_symbol,
                     status="queued",
@@ -124,6 +136,7 @@ class BackgroundRefreshManager:
                     self._queued_force_full[normalized_symbol] = True
                     self._queued_at[normalized_symbol] = now
                     enqueue_job = True
+                    queued_record_message = "Queued for full data refresh after current run."
                     response_state = RefreshSymbolState(
                         symbol=normalized_symbol,
                         status="queued",
@@ -151,7 +164,11 @@ class BackgroundRefreshManager:
                 self._queued_force_full[normalized_symbol] = force_full
                 self._queued_at[normalized_symbol] = now
                 enqueue_job = True
+                queued_record_message = state.message
                 response_state = state
+
+        if queued_record_message:
+            await asyncio.to_thread(_record_refresh_queued, normalized_symbol, now, queued_record_message)
 
         if enqueue_job:
             await self._put_queue(RefreshJob(normalized_symbol, force_full=force_full))
@@ -180,6 +197,7 @@ class BackgroundRefreshManager:
         auto_refresh_enabled = _auto_refresh_enabled(now)
         next_auto_refresh_at = _next_auto_refresh_at(now, self.interval_seconds)
         last_close_verification_at = await asyncio.to_thread(_last_close_verification_at)
+        symbol_states = await asyncio.to_thread(_refresh_state_rows)
         async with self._lock:
             status = "idle"
             if self._current_symbol:
@@ -197,21 +215,7 @@ class BackgroundRefreshManager:
                 "next_auto_refresh_at": self._next_auto_refresh_at if auto_refresh_enabled and self._next_auto_refresh_at else next_auto_refresh_at,
                 "last_refresh_finished_at": self._last_refresh_finished_at,
                 "last_close_verification_at": last_close_verification_at,
-                "symbols": [
-                    {
-                        "symbol": state.symbol,
-                        "status": state.status,
-                        "message": state.message,
-                        "queued_at": state.queued_at,
-                        "started_at": state.started_at,
-                        "finished_at": state.finished_at,
-                    }
-                    for state in sorted(
-                        self._states.values(),
-                        key=lambda item: item.finished_at or item.started_at or item.queued_at or datetime.min.replace(tzinfo=UTC),
-                        reverse=True,
-                    )
-                ],
+                "symbols": symbol_states,
             }
 
     async def _put_queue(self, job: RefreshJob) -> None:
@@ -256,6 +260,7 @@ class BackgroundRefreshManager:
         if self._queue:
             await self._queue.join()
         await asyncio.to_thread(_log_close_verification_result, started_at, len(states))
+        await asyncio.to_thread(cleanup_crawler_logs_if_due)
 
     async def _refresh_symbol(self, job: RefreshJob) -> None:
         started_at = datetime.now(UTC)
@@ -277,6 +282,14 @@ class BackgroundRefreshManager:
                 started_at=started_at,
             )
 
+        await asyncio.to_thread(
+            _record_refresh_running,
+            symbol,
+            started_at,
+            queued_at,
+            "Refreshing all cached data." if force_full else "Refreshing market data.",
+        )
+
         try:
             message = await asyncio.to_thread(
                 _refresh_symbol_sync,
@@ -287,6 +300,7 @@ class BackgroundRefreshManager:
             )
         except Exception as exc:
             finished_at = datetime.now(UTC)
+            await asyncio.to_thread(_record_refresh_failed, symbol, str(exc), started_at, finished_at)
             async with self._lock:
                 if symbol in self._deleted_symbols:
                     self._states.pop(symbol, None)
@@ -308,6 +322,7 @@ class BackgroundRefreshManager:
             return
 
         finished_at = datetime.now(UTC)
+        await asyncio.to_thread(_record_refresh_success, symbol, message, started_at, finished_at)
         async with self._lock:
             if symbol in self._deleted_symbols:
                 self._states.pop(symbol, None)
@@ -344,6 +359,150 @@ def _active_stock_exists(symbol: str) -> bool:
                 select(Stock.id).where(Stock.symbol == symbol, Stock.is_active.is_(True))
             )
         )
+
+
+def _refresh_state_rows() -> list[dict]:
+    with SessionLocal() as session:
+        active_stocks = session.scalars(
+            select(Stock).where(Stock.is_active.is_(True)).order_by(Stock.display_order, Stock.symbol)
+        ).all()
+        states = {
+            state.symbol: state
+            for state in session.scalars(select(StockRefreshState)).all()
+        }
+        return [
+            _refresh_state_response(
+                states.get(stock.symbol)
+                or StockRefreshState(symbol=stock.symbol, status="idle", message="")
+            )
+            for stock in active_stocks
+        ]
+
+
+def _refresh_state_response(state: StockRefreshState) -> dict:
+    return {
+        "symbol": state.symbol,
+        "status": state.status,
+        "message": state.message,
+        "failure_count": state.failure_count or 0,
+        "last_error": state.last_error,
+        "next_retry_at": state.next_retry_at,
+        "queued_at": state.queued_at,
+        "started_at": state.started_at,
+        "finished_at": state.finished_at,
+    }
+
+
+def _retry_wait_state(symbol: str, now: datetime) -> RefreshSymbolState | None:
+    with SessionLocal() as session:
+        state = session.scalar(select(StockRefreshState).where(StockRefreshState.symbol == symbol))
+        if not state or not state.next_retry_at or state.status not in {"failed", "retry_wait"}:
+            return None
+
+        next_retry_at = _as_aware_utc(state.next_retry_at)
+        if next_retry_at <= _as_aware_utc(now):
+            return None
+
+        state.status = "retry_wait"
+        state.message = "更新失敗，等待自動重試；目前使用快取"
+        state.updated_at = now
+        session.commit()
+        return RefreshSymbolState(
+            symbol=symbol,
+            status="retry_wait",
+            message=state.message,
+            queued_at=state.queued_at,
+            started_at=state.started_at,
+            finished_at=state.finished_at,
+        )
+
+
+def _record_refresh_queued(symbol: str, queued_at: datetime, message: str) -> None:
+    with SessionLocal() as session:
+        if not _active_stock_exists_in_session(session, symbol):
+            return
+        state = _get_or_create_refresh_state(session, symbol)
+        state.status = "queued"
+        state.message = message
+        state.queued_at = queued_at
+        state.next_retry_at = None
+        state.updated_at = queued_at
+        session.commit()
+
+
+def _record_refresh_running(symbol: str, started_at: datetime, queued_at: datetime | None, message: str) -> None:
+    with SessionLocal() as session:
+        if not _active_stock_exists_in_session(session, symbol):
+            return
+        state = _get_or_create_refresh_state(session, symbol)
+        state.status = "running"
+        state.message = message
+        state.queued_at = queued_at or state.queued_at
+        state.started_at = started_at
+        state.updated_at = started_at
+        session.commit()
+
+
+def _record_refresh_success(symbol: str, message: str, started_at: datetime, finished_at: datetime) -> None:
+    with SessionLocal() as session:
+        if not _active_stock_exists_in_session(session, symbol):
+            return
+        state = _get_or_create_refresh_state(session, symbol)
+        state.status = "success"
+        state.message = message
+        state.failure_count = 0
+        state.last_error = None
+        state.next_retry_at = None
+        state.started_at = started_at
+        state.finished_at = finished_at
+        state.updated_at = finished_at
+        session.commit()
+
+
+def _record_refresh_failed(symbol: str, error: str, started_at: datetime, finished_at: datetime) -> None:
+    with SessionLocal() as session:
+        if not _active_stock_exists_in_session(session, symbol):
+            return
+        state = _get_or_create_refresh_state(session, symbol)
+        failure_count = (state.failure_count or 0) + 1
+        state.status = "failed"
+        state.message = "更新失敗，使用快取"
+        state.failure_count = failure_count
+        state.last_error = error[:500]
+        state.next_retry_at = finished_at + timedelta(seconds=_retry_delay_seconds(failure_count))
+        state.started_at = started_at
+        state.finished_at = finished_at
+        state.updated_at = finished_at
+        log_crawler_result(
+            session=session,
+            job_name=f"market_refresh:{symbol}",
+            status="FAILED",
+            message=error,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+        session.commit()
+
+
+def _get_or_create_refresh_state(session, symbol: str) -> StockRefreshState:
+    state = session.scalar(select(StockRefreshState).where(StockRefreshState.symbol == symbol))
+    if not state:
+        state = StockRefreshState(symbol=symbol, status="idle", message="")
+        session.add(state)
+        session.flush()
+    return state
+
+
+def _active_stock_exists_in_session(session, symbol: str) -> bool:
+    stock_id = session.scalar(
+        select(Stock.id).where(Stock.symbol == symbol, Stock.is_active.is_(True))
+    )
+    return stock_id is not None
+
+
+def _retry_delay_seconds(failure_count: int) -> int:
+    index = max(0, min(failure_count - 1, len(RETRY_BACKOFF_SECONDS) - 1))
+    return RETRY_BACKOFF_SECONDS[index]
 
 
 def _as_aware_utc(value: datetime) -> datetime:
@@ -515,6 +674,20 @@ def _ensure_active_placeholder(symbol: str) -> None:
         session.commit()
 
 
+def _cached_profile_snapshot(symbol: str) -> StockProfileSnapshot | None:
+    with SessionLocal() as session:
+        stock = session.scalar(select(Stock).where(Stock.symbol == symbol, Stock.is_active.is_(True)))
+        if not stock:
+            return None
+        return StockProfileSnapshot(
+            symbol=stock.symbol,
+            name=stock.name,
+            asset_type=stock.asset_type,
+            market=stock.market,
+            currency=stock.currency,
+        )
+
+
 def _refresh_symbol_sync(
     symbol: str,
     wantgoo_base_url: str,
@@ -528,11 +701,19 @@ def _refresh_symbol_sync(
     pe_due, eps_due = (True, True) if force_full else _refresh_due(symbol, started_at)
     broker_trading_due = True if force_full else _broker_trading_due(symbol, started_at)
     calculated_at = datetime.now(UTC)
-    profile = fetch_stock_profile(symbol, wantgoo_base_url)
-    quote = fetch_stock_quote(symbol, wantgoo_base_url)
-
     messages = ["全量刷新：股價已更新" if force_full else "股價已更新"]
     source_parts = ["WantGoo quote"]
+
+    try:
+        profile = fetch_stock_profile(symbol, wantgoo_base_url)
+    except Exception as exc:
+        profile = _cached_profile_snapshot(symbol)
+        if not profile:
+            raise
+        messages.append(f"profile 更新失敗，沿用快取：{exc}")
+        source_parts.append("cached profile")
+
+    quote = fetch_stock_quote(symbol, wantgoo_base_url)
     current_pe = None
     pe_updated_at = None
     eps_rows = None
@@ -570,7 +751,7 @@ def _refresh_symbol_sync(
         else:
             eps_updated_at = calculated_at
             messages.append("EPS 已按日更新")
-            source_parts.append("FinMind daily EPS")
+            source_parts.append("HiStock daily EPS")
     else:
         messages.append("EPS 沿用今日快取")
         source_parts.append("cached daily EPS")

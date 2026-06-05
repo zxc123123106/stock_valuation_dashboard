@@ -19,6 +19,7 @@ from .database import (
     StockEPS,
     StockMetric,
     StockPosition,
+    StockRefreshState,
     StockValuation,
     get_session,
     init_database,
@@ -268,7 +269,7 @@ def health() -> HealthResponse:
 async def metadata(session: Session = Depends(get_session)) -> MetadataResponse:
     refresh_status = await refresh_manager.snapshot()
     return MetadataResponse(
-        data_source="WantGoo quote + TWSE OpenAPI PE + FinMind EPS + Yahoo broker trading",
+        data_source="WantGoo quote + TWSE OpenAPI PE + HiStock EPS + Yahoo broker trading",
         api_version=settings.api_version,
         stocks_count=len(_active_stocks(session)),
         valuations_count=_active_valuations_count(session),
@@ -360,6 +361,7 @@ async def delete_stock(symbol: str, session: Session = Depends(get_session)) -> 
     session.execute(delete(StockMetric).where(StockMetric.stock_id == stock.id))
     session.execute(delete(StockEPS).where(StockEPS.stock_id == stock.id))
     session.execute(delete(StockValuation).where(StockValuation.stock_id == stock.id))
+    session.execute(delete(StockRefreshState).where(StockRefreshState.symbol == normalized_symbol))
     session.execute(delete(CrawlerLog).where(CrawlerLog.job_name == f"market_refresh:{normalized_symbol}"))
     session.delete(stock)
     session.commit()

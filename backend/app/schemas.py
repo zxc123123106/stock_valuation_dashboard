@@ -105,6 +105,9 @@ class RefreshSymbolStateResponse(BaseModel):
     symbol: str
     status: str
     message: str
+    failure_count: int = 0
+    last_error: str | None = None
+    next_retry_at: datetime | None = None
     queued_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None

@@ -40,6 +40,8 @@ class Settings:
     cors_origins: list[str]
     wantgoo_base_url: str
     background_refresh_seconds: int
+    crawler_log_retention_days: int
+    crawler_log_cleanup_interval_hours: int
     api_version: str = "0.1.0"
 
 
@@ -70,5 +72,13 @@ def get_settings() -> Settings:
         background_refresh_seconds=_parse_positive_int(
             os.getenv("BACKGROUND_REFRESH_SECONDS", "60"),
             60,
+        ),
+        crawler_log_retention_days=_parse_positive_int(
+            os.getenv("CRAWLER_LOG_RETENTION_DAYS", "30"),
+            30,
+        ),
+        crawler_log_cleanup_interval_hours=_parse_positive_int(
+            os.getenv("CRAWLER_LOG_CLEANUP_INTERVAL_HOURS", "24"),
+            24,
         ),
     )

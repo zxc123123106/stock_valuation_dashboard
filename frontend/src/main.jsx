@@ -49,9 +49,11 @@ const EPS_LABELS = {
 const REFRESH_STATUS_LABELS = {
   idle: "待命",
   queued: "已排入",
+  running: "更新中",
   refreshing: "更新中",
   success: "已更新",
-  failed: "更新失敗",
+  failed: "更新失敗，使用快取",
+  retry_wait: "等待重試",
 };
 
 const MARKET_SESSION_LABELS = {
@@ -161,14 +163,14 @@ function applyDisplayOrder(stocks) {
 }
 
 function isPendingRefresh(state) {
-  return state?.status === "queued" || state?.status === "refreshing";
+  return state?.status === "queued" || state?.status === "running" || state?.status === "refreshing";
 }
 
 function isVisibleRefreshState(state, now) {
   if (!state) {
     return false;
   }
-  if (state.status === "queued" || state.status === "refreshing" || state.status === "failed") {
+  if (state.status === "queued" || state.status === "running" || state.status === "refreshing" || state.status === "failed" || state.status === "retry_wait") {
     return true;
   }
   if (state.status === "success" && state.finished_at) {
@@ -593,7 +595,7 @@ function App() {
         <div className="metric">
           <span>背景快取</span>
           <strong>{REFRESH_STATUS_LABELS[refreshStatus.status] || refreshStatus.status || "待命"}</strong>
-          <small>{refreshWindow} · 手動更新不限時</small>
+          <small>{refreshWindow} · 失敗使用快取</small>
         </div>
         <div className="metric">
           <span>自動更新</span>
@@ -603,7 +605,7 @@ function App() {
         <div className="metric">
           <span>目前更新</span>
           <strong>{currentRefreshText}</strong>
-          <small>主力進出每日更新 · {metadata?.data_source || "SQLite 快取資料"}</small>
+          <small>前端每 {POLL_SECONDS} 秒讀快取 · {metadata?.data_source || "SQLite 快取資料"}</small>
         </div>
         <div className="metric">
           <span>最近資料</span>
@@ -823,8 +825,8 @@ const StockCard = React.forwardRef(function StockCard(
               {isEtf && <span className="asset-pill">ETF</span>}
               {showRefreshState && (
                 <span className={`status-pill ${refreshState.status}`}>
-                  {refreshState.status === "refreshing" ? <Loader2 size={13} /> : null}
-                  {refreshState.status === "queued" ? <Clock3 size={13} /> : null}
+                  {refreshState.status === "running" || refreshState.status === "refreshing" ? <Loader2 size={13} /> : null}
+                  {refreshState.status === "queued" || refreshState.status === "retry_wait" ? <Clock3 size={13} /> : null}
                   {refreshState.status === "success" ? <CheckCircle2 size={13} /> : null}
                   {refreshState.status === "failed" ? <AlertCircle size={13} /> : null}
                   {statusLabel}

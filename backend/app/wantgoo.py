@@ -12,7 +12,9 @@ import requests
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 MONEY = Decimal("0.01")
 TWSE_OPENAPI_BASE_URL = "https://openapi.twse.com.tw/v1"
-FINMIND_BASE_URL = "https://api.finmindtrade.com/api/v4/data"
+WANTGOO_PROFILE_CACHE_SECONDS = 6 * 60 * 60
+WANTGOO_QUOTE_CACHE_SECONDS = 55
+_JSON_CACHE: dict[str, tuple[datetime, object]] = {}
 
 
 @dataclass(frozen=True)
@@ -58,7 +60,9 @@ def fetch_stock_snapshot(symbol: str, base_url: str) -> StockSnapshot:
 
     profile = _profile_snapshot(normalized_symbol, _fetch_wantgoo_profile(session, normalized_symbol, base_url))
     quote = _quote_snapshot(normalized_symbol, _fetch_wantgoo_quote(session, normalized_symbol, base_url))
-    eps_rows = _fetch_finmind_eps(session, normalized_symbol)
+    from .histock_eps import fetch_stock_eps as fetch_histock_eps
+
+    eps_rows = fetch_histock_eps(normalized_symbol)
     current_pe = _fetch_twse_pe(session, normalized_symbol) or derive_pe(quote.current_price, eps_rows)
 
     return StockSnapshot(
@@ -70,7 +74,7 @@ def fetch_stock_snapshot(symbol: str, base_url: str) -> StockSnapshot:
         current_pe=current_pe,
         price_updated_at=quote.price_updated_at,
         eps_rows=eps_rows,
-        source="WantGoo quote + TWSE PE + FinMind EPS",
+        source="WantGoo quote + TWSE PE + HiStock EPS",
         fetched_at=datetime.now(TAIPEI_TZ),
     )
 
@@ -95,8 +99,9 @@ def fetch_stock_pe(symbol: str) -> Decimal | None:
 
 def fetch_stock_eps(symbol: str) -> list[EpsSnapshot]:
     normalized_symbol = normalize_symbol(symbol)
-    session = _build_session()
-    return _fetch_finmind_eps(session, normalized_symbol)
+    from .histock_eps import fetch_stock_eps as fetch_histock_eps
+
+    return fetch_histock_eps(normalized_symbol)
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -120,7 +125,11 @@ def _build_session() -> requests.Session:
 
 
 def _fetch_wantgoo_profile(session: requests.Session, symbol: str, base_url: str) -> dict:
-    rows = _get_json(session, f"{base_url.rstrip('/')}/investrue/all-alive")
+    rows = _get_cached_json(
+        session,
+        f"{base_url.rstrip('/')}/investrue/all-alive",
+        ttl_seconds=WANTGOO_PROFILE_CACHE_SECONDS,
+    )
     profile = next(
         (
             row
@@ -143,7 +152,11 @@ def _fetch_wantgoo_profile(session: requests.Session, symbol: str, base_url: str
 
 
 def _fetch_wantgoo_quote(session: requests.Session, symbol: str, base_url: str) -> dict:
-    rows = _get_json(session, f"{base_url.rstrip('/')}/investrue/all-quote-info")
+    rows = _get_cached_json(
+        session,
+        f"{base_url.rstrip('/')}/investrue/all-quote-info",
+        ttl_seconds=WANTGOO_QUOTE_CACHE_SECONDS,
+    )
     quote = next((row for row in rows if isinstance(row, dict) and row.get("id") == symbol), None)
     if not quote:
         raise ValueError(f"Could not find quote for {symbol}.")
@@ -184,57 +197,6 @@ def _fetch_twse_pe(session: requests.Session, symbol: str) -> Decimal | None:
     return _optional_money(row.get("PEratio"))
 
 
-def _fetch_finmind_eps(session: requests.Session, symbol: str) -> list[EpsSnapshot]:
-    current_year = datetime.now(TAIPEI_TZ).year
-    start_date = f"{current_year - 3}-01-01"
-    payload = _get_json(
-        session,
-        FINMIND_BASE_URL,
-        params={
-            "dataset": "TaiwanStockFinancialStatements",
-            "data_id": symbol,
-            "start_date": start_date,
-        },
-    )
-    if payload.get("status") != 200:
-        raise ValueError(f"FinMind EPS request failed for {symbol}: {payload.get('msg', 'unknown error')}")
-
-    eps_rows = [
-        (_parse_quarter(row["date"]), _money(row["value"]))
-        for row in payload.get("data", [])
-        if isinstance(row, dict) and row.get("type") == "EPS" and row.get("date")
-    ]
-    eps_rows.sort(key=lambda row: row[0])
-    if len(eps_rows) < 4:
-        raise ValueError(f"Could not find at least four quarterly EPS rows for {symbol}.")
-
-    latest_four = eps_rows[-4:]
-    ttm_value = sum((eps for _, eps in latest_four), Decimal("0.00")).quantize(MONEY, rounding=ROUND_HALF_UP)
-    ttm_period = " + ".join(_quarter_label(quarter) for quarter, _ in reversed(latest_four))
-
-    years = sorted({quarter[0] for quarter, _ in eps_rows}, reverse=True)
-    complete_year = next(
-        (
-            year
-            for year in years
-            if len([quarter for quarter, _ in eps_rows if quarter[0] == year]) == 4
-        ),
-        None,
-    )
-    if complete_year is None:
-        raise ValueError(f"Could not find a complete fiscal year EPS set for {symbol}.")
-
-    last_year_value = sum(
-        (eps for quarter, eps in eps_rows if quarter[0] == complete_year),
-        Decimal("0.00"),
-    ).quantize(MONEY, rounding=ROUND_HALF_UP)
-
-    return [
-        EpsSnapshot(eps_type="TTM", eps_value=ttm_value, eps_period=ttm_period),
-        EpsSnapshot(eps_type="LAST_YEAR", eps_value=last_year_value, eps_period=str(complete_year)),
-    ]
-
-
 def derive_pe(current_price: Decimal, eps_rows: list[EpsSnapshot]) -> Decimal:
     ttm = next((row.eps_value for row in eps_rows if row.eps_type == "TTM"), None)
     if not ttm:
@@ -247,6 +209,19 @@ def _get_json(session: requests.Session, url: str, params: dict[str, str] | None
     response = session.get(url, params=params, timeout=20)
     response.raise_for_status()
     return response.json()
+
+
+def _get_cached_json(session: requests.Session, url: str, *, ttl_seconds: int):
+    now = datetime.now(UTC)
+    cached = _JSON_CACHE.get(url)
+    if cached:
+        cached_at, payload = cached
+        if (now - cached_at).total_seconds() < ttl_seconds:
+            return payload
+
+    payload = _get_json(session, url)
+    _JSON_CACHE[url] = (now, payload)
+    return payload
 
 
 def _money(value) -> Decimal:
@@ -276,15 +251,6 @@ def _optional_decimal(value) -> Decimal | None:
 def _timestamp_from_millis(value) -> datetime:
     timestamp = float(value) / 1000
     return datetime.fromtimestamp(timestamp, tz=UTC).astimezone(TAIPEI_TZ)
-
-
-def _parse_quarter(value: str) -> tuple[int, int]:
-    parsed = datetime.strptime(value, "%Y-%m-%d")
-    return parsed.year, ((parsed.month - 1) // 3) + 1
-
-
-def _quarter_label(quarter: tuple[int, int]) -> str:
-    return f"{quarter[0]}Q{quarter[1]}"
 
 
 def _map_market(market: str) -> str:
