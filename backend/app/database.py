@@ -85,7 +85,9 @@ class StockMetric(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    open_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     current_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    change_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
     current_pe: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     price_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     pe_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -232,6 +234,7 @@ def init_database() -> None:
     Base.metadata.create_all(engine)
     ensure_stock_display_order_column()
     ensure_stock_asset_type_column()
+    ensure_stock_metric_quote_columns()
     with SessionLocal() as session:
         backfill_display_order(session)
         remove_unsupported_eps(session)
@@ -258,6 +261,18 @@ def ensure_stock_asset_type_column() -> None:
         if "asset_type" not in columns:
             connection.execute(text("ALTER TABLE stocks ADD COLUMN asset_type VARCHAR(16) NOT NULL DEFAULT 'STOCK'"))
         connection.execute(text("UPDATE stocks SET asset_type = 'STOCK' WHERE asset_type IS NULL OR asset_type = ''"))
+
+
+def ensure_stock_metric_quote_columns() -> None:
+    with engine.begin() as connection:
+        columns = {
+            row._mapping["name"]
+            for row in connection.execute(text("PRAGMA table_info(stock_metrics)"))
+        }
+        if "open_price" not in columns:
+            connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN open_price NUMERIC(12, 2)"))
+        if "change_percent" not in columns:
+            connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN change_percent NUMERIC(8, 2)"))
 
 
 def backfill_display_order(session: Session) -> None:
@@ -331,7 +346,9 @@ def create_seed_snapshot(session: Session, stock: Stock | None = None) -> None:
 
     metric = StockMetric(
         stock_id=stock.id,
+        open_price=Decimal("2400.00"),
         current_price=Decimal("2425.00"),
+        change_percent=Decimal("1.04"),
         current_pe=Decimal("32.00"),
         price_updated_at=now,
         pe_updated_at=now,
@@ -430,7 +447,9 @@ def apply_stock_snapshot(session: Session, snapshot) -> Stock:
     session.add(
         StockMetric(
             stock_id=stock.id,
+            open_price=snapshot.open_price,
             current_price=snapshot.current_price,
+            change_percent=snapshot.change_percent,
             current_pe=snapshot.current_pe,
             price_updated_at=snapshot.price_updated_at,
             pe_updated_at=snapshot.price_updated_at,
@@ -533,7 +552,9 @@ def apply_layered_stock_refresh(
     session.add(
         StockMetric(
             stock_id=stock.id,
+            open_price=quote.open_price,
             current_price=quote.current_price,
+            change_percent=quote.change_percent,
             current_pe=metric_pe,
             price_updated_at=quote.price_updated_at,
             pe_updated_at=metric_pe_updated_at,

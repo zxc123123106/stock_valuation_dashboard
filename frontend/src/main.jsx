@@ -884,30 +884,44 @@ const StockCard = React.forwardRef(function StockCard(
         </div>
       </header>
 
-      <PositionEditor
-        stock={stock}
-        disabled={actionDisabled || pendingRefresh || overlay}
-        onSavePosition={onSavePosition}
-        onClearPosition={onClearPosition}
-      />
-
       <div className="stock-metrics">
-        <div>
-          <span>股價</span>
-          <strong>{formatOptionalNumber(metric?.current_price)}</strong>
+        <div className="metric-tile quote-stack-tile">
+          <div className="quote-stack-row">
+            <span className="metric-label">開盤價</span>
+            <strong>{formatOptionalNumber(metric?.open_price)}</strong>
+          </div>
+          <div className="quote-stack-row">
+            <span className="metric-label">現價</span>
+            <strong>{formatOptionalNumber(metric?.current_price)}</strong>
+          </div>
+          <div className="quote-stack-row">
+            <span className="metric-label">漲跌幅</span>
+            <strong className={valueToneClass(metric?.change_percent)}>
+              {formatOptionalSignedPercent(metric?.change_percent)}
+            </strong>
+          </div>
         </div>
         {!isEtf && (
-          <div>
-            <span>本益比</span>
+          <div className="metric-tile">
+            <span className="metric-label">本益比</span>
             <strong>{formatOptionalNumber(metric?.current_pe)}</strong>
           </div>
         )}
-        <div>
-          <span>損益</span>
-          <strong className={valueToneClass(stock.position?.unrealized_profit_loss)}>
-            {formatOptionalSignedPercent(stock.position?.unrealized_profit_loss_percent)}
-          </strong>
-          <small>{formatOptionalSignedNumber(stock.position?.unrealized_profit_loss)}</small>
+        <div className="metric-tile profit-tile">
+          <div className="profit-values">
+            <span className="metric-label">損益</span>
+            <strong className={valueToneClass(stock.position?.unrealized_profit_loss)}>
+              {formatOptionalSignedPercent(stock.position?.unrealized_profit_loss_percent)}
+            </strong>
+            <small>{formatOptionalSignedNumber(stock.position?.unrealized_profit_loss)}</small>
+          </div>
+          <PositionEditor
+            stock={stock}
+            disabled={actionDisabled || pendingRefresh || overlay}
+            onSavePosition={onSavePosition}
+            onClearPosition={onClearPosition}
+            compact
+          />
         </div>
       </div>
 
@@ -1040,7 +1054,7 @@ function BrokerRanking({ title, rows = [] }) {
   );
 }
 
-function PositionEditor({ stock, disabled, onSavePosition, onClearPosition }) {
+function PositionEditor({ stock, disabled, onSavePosition, onClearPosition, compact = false }) {
   const [draftBuyPrice, setDraftBuyPrice] = useState(stock.position?.buy_price?.toString() || "");
 
   useEffect(() => {
@@ -1057,7 +1071,7 @@ function PositionEditor({ stock, disabled, onSavePosition, onClearPosition }) {
   }
 
   return (
-    <div className="position-row">
+    <div className={`position-row${compact ? " compact" : ""}`}>
       <label className="buy-price-field">
         <span>買入價</span>
         <input

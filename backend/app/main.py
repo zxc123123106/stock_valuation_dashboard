@@ -81,6 +81,10 @@ def _float(value: Decimal | None) -> float:
     return float(value or Decimal("0"))
 
 
+def _optional_float(value: Decimal | None) -> float | None:
+    return float(value) if value is not None else None
+
+
 def _percent(numerator: Decimal, denominator: Decimal) -> Decimal:
     if denominator == 0:
         return Decimal("0.00")
@@ -240,7 +244,9 @@ def _stock_response(stock: Stock, session: Session) -> StockResponse:
         is_active=stock.is_active,
         display_order=stock.display_order,
         metric=StockMetricResponse(
+            open_price=_optional_float(metric.open_price),
             current_price=_float(metric.current_price),
+            change_percent=_optional_float(metric.change_percent),
             current_pe=_float(metric.current_pe),
             price_updated_at=metric.price_updated_at,
             pe_updated_at=metric.pe_updated_at,

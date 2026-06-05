@@ -28,7 +28,9 @@ class MetadataResponse(BaseModel):
 
 
 class StockMetricResponse(BaseModel):
+    open_price: float | None = None
     current_price: float
+    change_percent: float | None = None
     current_pe: float
     price_updated_at: datetime
     pe_updated_at: datetime

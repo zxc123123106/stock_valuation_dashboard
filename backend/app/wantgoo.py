@@ -36,7 +36,9 @@ class StockProfileSnapshot:
 @dataclass(frozen=True)
 class QuoteSnapshot:
     symbol: str
+    open_price: Decimal | None
     current_price: Decimal
+    change_percent: Decimal | None
     price_updated_at: datetime
 
 
@@ -46,7 +48,9 @@ class StockSnapshot:
     name: str
     market: str
     currency: str
+    open_price: Decimal | None
     current_price: Decimal
+    change_percent: Decimal | None
     current_pe: Decimal
     price_updated_at: datetime
     eps_rows: list[EpsSnapshot]
@@ -70,7 +74,9 @@ def fetch_stock_snapshot(symbol: str, base_url: str) -> StockSnapshot:
         name=profile.name,
         market=profile.market,
         currency=profile.currency,
+        open_price=quote.open_price,
         current_price=quote.current_price,
+        change_percent=quote.change_percent,
         current_pe=current_pe,
         price_updated_at=quote.price_updated_at,
         eps_rows=eps_rows,
@@ -181,9 +187,13 @@ def _profile_snapshot(symbol: str, profile: dict) -> StockProfileSnapshot:
 
 
 def _quote_snapshot(symbol: str, quote: dict) -> QuoteSnapshot:
+    current_price = _money(quote["close"] or quote["open"] or quote["flat"])
+    open_price = _optional_money(quote["open"])
     return QuoteSnapshot(
         symbol=symbol,
-        current_price=_money(quote["close"] or quote["open"] or quote["flat"]),
+        open_price=open_price,
+        current_price=current_price,
+        change_percent=_quote_change_percent(current_price, open_price),
         price_updated_at=_timestamp_from_millis(quote["time"]),
     )
 
@@ -203,6 +213,12 @@ def derive_pe(current_price: Decimal, eps_rows: list[EpsSnapshot]) -> Decimal:
         raise ValueError("Could not derive P/E without TTM EPS.")
 
     return (current_price / ttm).quantize(MONEY, rounding=ROUND_HALF_UP)
+
+
+def _quote_change_percent(current_price: Decimal, open_price: Decimal | None) -> Decimal | None:
+    if open_price is None or open_price == 0:
+        return None
+    return ((current_price - open_price) / open_price * Decimal("100")).quantize(MONEY, rounding=ROUND_HALF_UP)
 
 
 def _get_json(session: requests.Session, url: str, params: dict[str, str] | None = None):

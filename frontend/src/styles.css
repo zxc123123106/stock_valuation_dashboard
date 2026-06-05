@@ -397,12 +397,20 @@ h1 {
 
 .position-row {
   display: grid;
-  grid-template-columns: minmax(100px, 15%) auto;
-  justify-content: start;
+  grid-template-columns: minmax(180px, 320px) auto;
+  align-items: center;
   gap: 10px;
+  justify-content: end;
   padding: 13px 16px;
   border-bottom: 1px solid var(--line-soft);
   background: rgba(17, 17, 16, 0.7);
+}
+
+.position-row.compact {
+  grid-template-columns: minmax(0, 1fr) auto;
+  justify-content: stretch;
+  padding: 0;
+  background: transparent;
 }
 
 .buy-price-field {
@@ -446,30 +454,88 @@ h1 {
 
 .stock-metrics {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 1px;
   background: var(--line-soft);
 }
 
-.stock-metrics div {
+.stock-metrics > .metric-tile {
   min-height: 74px;
   padding: 13px 16px;
   background: rgba(20, 20, 19, 0.96);
 }
 
-.stock-metrics span {
+.metric-tile > .metric-label,
+.profit-values > .metric-label,
+.quote-stack-row > .metric-label {
   display: block;
   margin-bottom: 8px;
   color: var(--muted);
   font-size: 0.78rem;
 }
 
-.stock-metrics strong {
+.metric-tile > strong,
+.profit-values > strong,
+.quote-stack-row > strong {
   display: block;
   overflow-wrap: anywhere;
   color: var(--gold-strong);
   font-size: 1.06rem;
   line-height: 1.35;
+}
+
+.metric-tile > strong.negative,
+.profit-values > strong.negative,
+.quote-stack-row > strong.negative {
+  color: var(--success);
+}
+
+.metric-tile > strong.positive,
+.profit-values > strong.positive,
+.quote-stack-row > strong.positive {
+  color: var(--gold-strong);
+}
+
+.quote-stack-tile {
+  display: grid;
+  gap: 0;
+  padding: 0;
+}
+
+.quote-stack-row {
+  display: grid;
+  grid-template-columns: minmax(68px, 0.8fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 11px 16px;
+}
+
+.quote-stack-row + .quote-stack-row {
+  border-top: 1px solid var(--line-soft);
+}
+
+.quote-stack-row > .metric-label {
+  margin-bottom: 0;
+}
+
+.quote-stack-row > strong {
+  text-align: right;
+}
+
+.profit-tile {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.profit-values {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.profit-values small {
+  display: block;
 }
 
 .valuation-table {
@@ -700,6 +766,10 @@ footer {
   .text-button {
     width: 100%;
   }
+
+  .position-row .sell-button {
+    width: auto;
+  }
 }
 
 @media (max-width: 520px) {
@@ -718,6 +788,10 @@ footer {
 
   .position-row {
     grid-template-columns: 1fr;
+  }
+
+  .position-row .sell-button {
+    width: 100%;
   }
 
   .stock-header {
