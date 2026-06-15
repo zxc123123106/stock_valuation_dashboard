@@ -41,7 +41,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -51,7 +52,8 @@ button:disabled {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: 2px solid var(--gold-strong);
   outline-offset: 2px;
 }
@@ -221,6 +223,37 @@ h1 {
   color: var(--muted-soft);
 }
 
+.broker-select-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  justify-self: end;
+  width: min(220px, 100%);
+  min-height: 42px;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.broker-select-field span {
+  font-size: 0.78rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.broker-select-field select {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: var(--surface);
+  color: var(--text-strong);
+  cursor: pointer;
+}
+
 .notice {
   display: flex;
   align-items: center;
@@ -249,6 +282,8 @@ h1 {
 }
 
 .stock-card {
+  min-width: 0;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: linear-gradient(180deg, var(--surface), #111110);
@@ -466,8 +501,9 @@ h1 {
 }
 
 .metric-tile > .metric-label,
-.profit-values > .metric-label,
-.quote-stack-row > .metric-label {
+.profit-section > .metric-label,
+.quote-current-row > .metric-label,
+.quote-comparison-item > .metric-label {
   display: block;
   margin-bottom: 8px;
   color: var(--muted);
@@ -475,8 +511,9 @@ h1 {
 }
 
 .metric-tile > strong,
-.profit-values > strong,
-.quote-stack-row > strong {
+.profit-section > strong,
+.quote-current-row > strong,
+.quote-comparison-item > strong {
   display: block;
   overflow-wrap: anywhere;
   color: var(--gold-strong);
@@ -485,42 +522,77 @@ h1 {
 }
 
 .metric-tile > strong.negative,
-.profit-values > strong.negative,
-.quote-stack-row > strong.negative {
+.profit-section > strong.negative,
+.quote-comparison-item > strong.negative {
   color: var(--success);
 }
 
 .metric-tile > strong.positive,
-.profit-values > strong.positive,
-.quote-stack-row > strong.positive {
+.profit-section > strong.positive,
+.quote-comparison-item > strong.positive {
   color: var(--gold-strong);
 }
 
-.quote-stack-tile {
+.quote-grid-tile {
   display: grid;
-  gap: 0;
+  align-content: start;
   padding: 0;
 }
 
-.quote-stack-row {
+.quote-current-row {
   display: grid;
-  grid-template-columns: minmax(68px, 0.8fr) minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 12px;
-  min-height: 48px;
-  padding: 11px 16px;
+  min-height: 58px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--line-soft);
 }
 
-.quote-stack-row + .quote-stack-row {
-  border-top: 1px solid var(--line-soft);
-}
-
-.quote-stack-row > .metric-label {
+.quote-current-row > .metric-label {
   margin-bottom: 0;
 }
 
-.quote-stack-row > strong {
+.quote-current-row > strong {
   text-align: right;
+  font-size: 1.18rem;
+}
+
+.pe-tile {
+  display: grid;
+  align-content: start;
+}
+
+.pe-current-row {
+  border-bottom: 0;
+}
+
+.quote-comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.quote-comparison-item {
+  min-width: 0;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.quote-comparison-item:nth-child(odd) {
+  border-right: 1px solid var(--line-soft);
+}
+
+.quote-comparison-item:nth-child(n + 3) {
+  border-bottom: 0;
+}
+
+.quote-comparison-item > .metric-label {
+  margin-bottom: 7px;
+}
+
+.quote-comparison-item > strong {
+  color: var(--gold-strong);
+  font-size: 0.98rem;
 }
 
 .profit-tile {
@@ -529,12 +601,12 @@ h1 {
   gap: 10px;
 }
 
-.profit-values {
+.profit-section {
   padding-bottom: 10px;
   border-bottom: 1px solid var(--line-soft);
 }
 
-.profit-values small {
+.profit-section small {
   display: block;
 }
 
@@ -570,6 +642,11 @@ h1 {
 .valuation-row strong,
 .valuation-row small {
   display: block;
+}
+
+.valuation-row .constant-value {
+  color: var(--gold-strong);
+  font-weight: 650;
 }
 
 .valuation-empty {
@@ -721,6 +798,18 @@ small {
   color: #a7e7c7;
 }
 
+.percentage-positive,
+.profit-section > strong.percentage-positive {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.percentage-negative,
+.profit-section > strong.percentage-negative {
+  color: var(--success);
+  font-weight: 650;
+}
+
 .empty {
   display: flex;
   align-items: center;
@@ -763,6 +852,11 @@ footer {
     grid-template-columns: 1fr;
   }
 
+  .broker-select-field {
+    justify-self: stretch;
+    width: 100%;
+  }
+
   .text-button {
     width: 100%;
   }
@@ -783,7 +877,7 @@ footer {
   }
 
   .stock-metrics {
-    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    grid-template-columns: 1fr;
   }
 
   .position-row {

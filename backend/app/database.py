@@ -11,6 +11,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from .config import PROJECT_ROOT, get_settings
+from .brokers import DEFAULT_BROKER_ID
 from .valuation import difference_percent, estimate_price, valuation_status
 
 
@@ -86,6 +87,9 @@ class StockMetric(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
     open_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    previous_close: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    day_high: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    day_low: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     current_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     change_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
     current_pe: Mapped[Decimal] = mapped_column(Numeric(12, 2))
@@ -225,6 +229,14 @@ class AppMaintenanceState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[str] = mapped_column(String(120))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
 def get_session() -> Generator[Session, None, None]:
     with SessionLocal() as session:
         yield session
@@ -239,6 +251,7 @@ def init_database() -> None:
         backfill_display_order(session)
         remove_unsupported_eps(session)
         seed_demo_data(session)
+        seed_app_settings(session)
     run_startup_maintenance()
 
 
@@ -271,8 +284,37 @@ def ensure_stock_metric_quote_columns() -> None:
         }
         if "open_price" not in columns:
             connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN open_price NUMERIC(12, 2)"))
+        if "previous_close" not in columns:
+            connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN previous_close NUMERIC(12, 2)"))
+        if "day_high" not in columns:
+            connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN day_high NUMERIC(12, 2)"))
+        if "day_low" not in columns:
+            connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN day_low NUMERIC(12, 2)"))
         if "change_percent" not in columns:
             connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN change_percent NUMERIC(8, 2)"))
+
+
+def seed_app_settings(session: Session) -> None:
+    if not session.get(AppSetting, "selected_broker"):
+        session.add(AppSetting(key="selected_broker", value=DEFAULT_BROKER_ID))
+        session.commit()
+
+
+def get_app_setting(session: Session, key: str, default: str | None = None) -> str | None:
+    setting = session.get(AppSetting, key)
+    return setting.value if setting else default
+
+
+def set_app_setting(session: Session, key: str, value: str) -> AppSetting:
+    setting = session.get(AppSetting, key)
+    if not setting:
+        setting = AppSetting(key=key, value=value)
+        session.add(setting)
+    else:
+        setting.value = value
+        setting.updated_at = datetime.now(UTC)
+    session.commit()
+    return setting
 
 
 def backfill_display_order(session: Session) -> None:
@@ -347,6 +389,9 @@ def create_seed_snapshot(session: Session, stock: Stock | None = None) -> None:
     metric = StockMetric(
         stock_id=stock.id,
         open_price=Decimal("2400.00"),
+        previous_close=Decimal("2380.00"),
+        day_high=Decimal("2440.00"),
+        day_low=Decimal("2390.00"),
         current_price=Decimal("2425.00"),
         change_percent=Decimal("1.04"),
         current_pe=Decimal("32.00"),
@@ -448,6 +493,9 @@ def apply_stock_snapshot(session: Session, snapshot) -> Stock:
         StockMetric(
             stock_id=stock.id,
             open_price=snapshot.open_price,
+            previous_close=snapshot.previous_close,
+            day_high=snapshot.day_high,
+            day_low=snapshot.day_low,
             current_price=snapshot.current_price,
             change_percent=snapshot.change_percent,
             current_pe=snapshot.current_pe,
@@ -553,6 +601,9 @@ def apply_layered_stock_refresh(
         StockMetric(
             stock_id=stock.id,
             open_price=quote.open_price,
+            previous_close=quote.previous_close,
+            day_high=quote.day_high,
+            day_low=quote.day_low,
             current_price=quote.current_price,
             change_percent=quote.change_percent,
             current_pe=metric_pe,

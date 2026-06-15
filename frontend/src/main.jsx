@@ -77,13 +77,6 @@ function formatOptionalNumber(value, digits = 2) {
   return formatNumber(value, digits);
 }
 
-function formatOptionalSignedNumber(value, digits = 2) {
-  if (value === null || value === undefined) {
-    return "—";
-  }
-  return formatSignedNumber(value, digits);
-}
-
 function formatOptionalSignedPercent(value, digits = 2) {
   if (value === null || value === undefined) {
     return "—";
@@ -104,6 +97,13 @@ function valueToneClass(value) {
     return "";
   }
   return value >= 0 ? "positive" : "negative";
+}
+
+function percentageToneClass(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return value >= 0 ? "percentage-positive" : "percentage-negative";
 }
 
 function formatDate(value) {
@@ -182,6 +182,7 @@ function isVisibleRefreshState(state, now) {
 function App() {
   const [stocks, setStocks] = useState([]);
   const [metadata, setMetadata] = useState(null);
+  const [brokerSetting, setBrokerSetting] = useState(null);
   const [refreshStatus, setRefreshStatus] = useState({ status: "idle", symbols: [], queue_length: 0 });
   const [symbolInput, setSymbolInput] = useState("2330");
   const [loading, setLoading] = useState(true);
@@ -232,10 +233,11 @@ function App() {
     }
 
     try {
-      const [stockResponse, metadataResponse, statusResponse] = await Promise.all([
+      const [stockResponse, metadataResponse, statusResponse, brokerResponse] = await Promise.all([
         fetch(`${API_BASE_URL}/api/stocks`),
         fetch(`${API_BASE_URL}/api/metadata`),
         fetch(`${API_BASE_URL}/api/refresh/status`),
+        fetch(`${API_BASE_URL}/api/settings/broker`),
       ]);
 
       if (!stockResponse.ok) {
@@ -244,6 +246,9 @@ function App() {
       if (!statusResponse.ok) {
         throw new Error(await parseError(statusResponse));
       }
+      if (!brokerResponse.ok) {
+        throw new Error(await parseError(brokerResponse));
+      }
 
       const nextStocks = await stockResponse.json();
       if (!reorderingRef.current) {
@@ -251,6 +256,7 @@ function App() {
       }
       setMetadata(metadataResponse.ok ? await metadataResponse.json() : null);
       setRefreshStatus(await statusResponse.json());
+      setBrokerSetting(await brokerResponse.json());
     } catch (requestError) {
       if (!silent) {
         setError(requestError.message);
@@ -391,6 +397,31 @@ function App() {
 
       replaceStock(await response.json());
       setMessage(`${symbol} 已賣出，買入價已清除`);
+    } catch (requestError) {
+      setError(requestError.message);
+    }
+  }
+
+  async function updateBroker(brokerId) {
+    setError("");
+    setMessage("");
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/settings/broker`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ broker_id: brokerId }),
+      });
+      if (!response.ok) {
+        throw new Error(await parseError(response));
+      }
+
+      const nextSetting = await response.json();
+      setBrokerSetting(nextSetting);
+      await loadData({ showLoading: false, silent: true });
+      setMessage(`券商已切換為 ${nextSetting.selected.name}`);
     } catch (requestError) {
       setError(requestError.message);
     }
@@ -631,6 +662,20 @@ function App() {
           <Plus size={17} />
           加入/更新
         </button>
+        <label className="broker-select-field">
+          <span>券商</span>
+          <select
+            value={brokerSetting?.selected_broker || "CATHAY"}
+            onChange={(event) => updateBroker(event.target.value)}
+            aria-label="選擇券商"
+          >
+            {(brokerSetting?.brokers || []).map((broker) => (
+              <option key={broker.broker_id} value={broker.broker_id}>
+                {broker.name}
+              </option>
+            ))}
+          </select>
+        </label>
       </form>
 
       {error && (
@@ -885,35 +930,38 @@ const StockCard = React.forwardRef(function StockCard(
       </header>
 
       <div className="stock-metrics">
-        <div className="metric-tile quote-stack-tile">
-          <div className="quote-stack-row">
-            <span className="metric-label">開盤價</span>
-            <strong>{formatOptionalNumber(metric?.open_price)}</strong>
-          </div>
-          <div className="quote-stack-row">
+        <div className="metric-tile quote-grid-tile">
+          <div className="quote-current-row">
             <span className="metric-label">現價</span>
             <strong>{formatOptionalNumber(metric?.current_price)}</strong>
           </div>
-          <div className="quote-stack-row">
-            <span className="metric-label">漲跌幅</span>
-            <strong className={valueToneClass(metric?.change_percent)}>
-              {formatOptionalSignedPercent(metric?.change_percent)}
-            </strong>
+          <div className="quote-comparison-grid">
+            <QuoteComparison label="開盤" value={metric?.open_price} />
+            <QuoteComparison label="昨收" value={metric?.previous_close} />
+            <QuoteComparison label="最高" value={metric?.day_high} />
+            <QuoteComparison label="最低" value={metric?.day_low} />
           </div>
         </div>
         {!isEtf && (
-          <div className="metric-tile">
-            <span className="metric-label">本益比</span>
-            <strong>{formatOptionalNumber(metric?.current_pe)}</strong>
+          <div className="metric-tile pe-tile">
+            <div className="quote-current-row pe-current-row">
+              <span className="metric-label">本益比</span>
+              <strong>{formatOptionalNumber(metric?.current_pe)}</strong>
+            </div>
           </div>
         )}
         <div className="metric-tile profit-tile">
-          <div className="profit-values">
-            <span className="metric-label">損益</span>
-            <strong className={valueToneClass(stock.position?.unrealized_profit_loss)}>
+          <div className="profit-section">
+            <span className="metric-label">純損益</span>
+            <strong className={percentageToneClass(stock.position?.unrealized_profit_loss_percent)}>
               {formatOptionalSignedPercent(stock.position?.unrealized_profit_loss_percent)}
             </strong>
-            <small>{formatOptionalSignedNumber(stock.position?.unrealized_profit_loss)}</small>
+          </div>
+          <div className="profit-section">
+            <span className="metric-label">費後損益估算</span>
+            <strong className={percentageToneClass(stock.position?.fee_adjusted_profit_loss_percent)}>
+              {formatOptionalSignedPercent(stock.position?.fee_adjusted_profit_loss_percent)}
+            </strong>
           </div>
           <PositionEditor
             stock={stock}
@@ -940,9 +988,9 @@ const StockCard = React.forwardRef(function StockCard(
           <div className="valuation-row head">
             <span></span>
             <span>EPS</span>
-            <span>估算股價</span>
-            <span>現值估算</span>
-            <span>成本估算</span>
+            <span>預期股價</span>
+            <span>預期損益</span>
+            <span>預期成本損益</span>
           </div>
           {stock.valuations.length ? (
             stock.valuations.map((valuation) => (
@@ -952,15 +1000,13 @@ const StockCard = React.forwardRef(function StockCard(
                     <strong>{EPS_LABELS[valuation.eps_type] || valuation.eps_type}</strong>
                     <small>{valuation.eps_period}</small>
                   </span>
-                  <span>{formatNumber(valuation.eps_value)}</span>
-                  <span>{formatNumber(valuation.estimated_price)}</span>
-                  <span className={valueToneClass(valuation.difference_percent)}>
+                  <span className="constant-value">{formatNumber(valuation.eps_value)}</span>
+                  <span className="constant-value">{formatNumber(valuation.estimated_price)}</span>
+                  <span className={percentageToneClass(valuation.difference_percent)}>
                     <strong>{formatOptionalSignedPercent(valuation.difference_percent)}</strong>
-                    <small>{formatSignedNumber(valuation.price_difference)}</small>
                   </span>
-                  <span className={valueToneClass(valuation.cost_difference_percent)}>
+                  <span className={percentageToneClass(valuation.cost_difference_percent)}>
                     <strong>{formatOptionalSignedPercent(valuation.cost_difference_percent)}</strong>
-                    <small>{formatOptionalSignedNumber(valuation.cost_difference)}</small>
                   </span>
                 </div>
                 {valuation.eps_type === "LAST_YEAR" && (
@@ -983,6 +1029,15 @@ const StockCard = React.forwardRef(function StockCard(
     </article>
   );
 });
+
+function QuoteComparison({ label, value }) {
+  return (
+    <div className="quote-comparison-item">
+      <span className="metric-label">{label}</span>
+      <strong>{formatOptionalNumber(value)}</strong>
+    </div>
+  );
+}
 
 function BrokerTradingDisclosure({ brokerTrading, expanded, onToggle }) {
   return (
@@ -1073,7 +1128,7 @@ function PositionEditor({ stock, disabled, onSavePosition, onClearPosition, comp
   return (
     <div className={`position-row${compact ? " compact" : ""}`}>
       <label className="buy-price-field">
-        <span>買入價</span>
+        <span>成交均價</span>
         <input
           inputMode="decimal"
           value={draftBuyPrice}

@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from .brokers import BrokerConfig, SECURITIES_TRANSACTION_TAX_RATE, broker_options, get_broker
 from .config import get_settings
 from .database import (
     CrawlerLog,
@@ -21,11 +22,16 @@ from .database import (
     StockPosition,
     StockRefreshState,
     StockValuation,
+    get_app_setting,
     get_session,
     init_database,
     ping_database,
+    set_app_setting,
 )
 from .schemas import (
+    BrokerOptionResponse,
+    BrokerSettingRequest,
+    BrokerSettingResponse,
     HealthResponse,
     MetadataResponse,
     BrokerTradingResponse,
@@ -163,20 +169,63 @@ def _valuation_response(valuation: StockValuation, buy_price: Decimal | None = N
     )
 
 
-def _position_response(position: StockPosition | None, metric: StockMetric | None) -> StockPositionResponse | None:
+def _selected_broker(session: Session) -> BrokerConfig:
+    broker_id = get_app_setting(session, "selected_broker", "CATHAY") or "CATHAY"
+    try:
+        return get_broker(broker_id)
+    except ValueError:
+        return get_broker("CATHAY")
+
+
+def _broker_option_response(broker: BrokerConfig) -> BrokerOptionResponse:
+    return BrokerOptionResponse(
+        broker_id=broker.broker_id,
+        name=broker.name,
+        buy_fee_rate=float(broker.buy_fee_rate),
+        sell_fee_rate=float(broker.sell_fee_rate),
+        source_url=broker.source_url,
+    )
+
+
+def _broker_setting_response(session: Session) -> BrokerSettingResponse:
+    selected = _selected_broker(session)
+    return BrokerSettingResponse(
+        selected_broker=selected.broker_id,
+        selected=_broker_option_response(selected),
+        brokers=[_broker_option_response(broker) for broker in broker_options()],
+    )
+
+
+def _position_response(
+    position: StockPosition | None,
+    metric: StockMetric | None,
+    broker: BrokerConfig,
+) -> StockPositionResponse | None:
     if not position:
         return None
 
     profit_loss = None
     profit_loss_percent = None
+    fee_adjusted_profit_loss = None
+    fee_adjusted_profit_loss_percent = None
     if metric:
         profit_loss = metric.current_price - position.buy_price
         profit_loss_percent = _percent(profit_loss, position.buy_price)
+        effective_buy_cost = position.buy_price * (Decimal("1") + broker.buy_fee_rate)
+        estimated_sell_proceeds = metric.current_price * (
+            Decimal("1") - broker.sell_fee_rate - SECURITIES_TRANSACTION_TAX_RATE
+        )
+        fee_adjusted_profit_loss = quantize_money(estimated_sell_proceeds - effective_buy_cost)
+        fee_adjusted_profit_loss_percent = _percent(fee_adjusted_profit_loss, effective_buy_cost)
 
     return StockPositionResponse(
         buy_price=_float(position.buy_price),
         unrealized_profit_loss=_float(profit_loss) if profit_loss is not None else None,
         unrealized_profit_loss_percent=_float(profit_loss_percent) if profit_loss_percent is not None else None,
+        fee_adjusted_profit_loss=_float(fee_adjusted_profit_loss) if fee_adjusted_profit_loss is not None else None,
+        fee_adjusted_profit_loss_percent=_float(fee_adjusted_profit_loss_percent) if fee_adjusted_profit_loss_percent is not None else None,
+        broker_id=broker.broker_id,
+        broker_fee_rate=float(broker.buy_fee_rate),
     )
 
 
@@ -227,6 +276,7 @@ def _broker_trading_row_response(row: StockBrokerTradingRow) -> BrokerTradingRow
 def _stock_response(stock: Stock, session: Session) -> StockResponse:
     metric = _latest_metric(session, stock.id)
     position = session.scalar(select(StockPosition).where(StockPosition.stock_id == stock.id))
+    broker = _selected_broker(session)
     valuations = []
     if stock.asset_type != "ETF":
         valuations = session.scalars(
@@ -245,6 +295,9 @@ def _stock_response(stock: Stock, session: Session) -> StockResponse:
         display_order=stock.display_order,
         metric=StockMetricResponse(
             open_price=_optional_float(metric.open_price),
+            previous_close=_optional_float(metric.previous_close),
+            day_high=_optional_float(metric.day_high),
+            day_low=_optional_float(metric.day_low),
             current_price=_float(metric.current_price),
             change_percent=_optional_float(metric.change_percent),
             current_pe=_float(metric.current_pe),
@@ -254,7 +307,7 @@ def _stock_response(stock: Stock, session: Session) -> StockResponse:
         )
         if metric
         else None,
-        position=_position_response(position, metric),
+        position=_position_response(position, metric, broker),
         broker_trading=_broker_trading_response(stock, session),
         valuations=[_valuation_response(valuation, position.buy_price if position else None) for valuation in valuations],
     )
@@ -288,6 +341,25 @@ async def metadata(session: Session = Depends(get_session)) -> MetadataResponse:
         last_refresh_finished_at=refresh_status["last_refresh_finished_at"],
         last_close_verification_at=refresh_status["last_close_verification_at"],
     )
+
+
+@app.get("/api/settings/broker", response_model=BrokerSettingResponse)
+def get_broker_setting(session: Session = Depends(get_session)) -> BrokerSettingResponse:
+    return _broker_setting_response(session)
+
+
+@app.put("/api/settings/broker", response_model=BrokerSettingResponse)
+def update_broker_setting(
+    payload: BrokerSettingRequest,
+    session: Session = Depends(get_session),
+) -> BrokerSettingResponse:
+    try:
+        broker = get_broker(payload.broker_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    set_app_setting(session, "selected_broker", broker.broker_id)
+    return _broker_setting_response(session)
 
 
 @app.get("/api/stocks", response_model=list[StockResponse])

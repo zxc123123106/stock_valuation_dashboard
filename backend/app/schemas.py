@@ -29,6 +29,9 @@ class MetadataResponse(BaseModel):
 
 class StockMetricResponse(BaseModel):
     open_price: float | None = None
+    previous_close: float | None = None
+    day_high: float | None = None
+    day_low: float | None = None
     current_price: float
     change_percent: float | None = None
     current_pe: float
@@ -55,6 +58,28 @@ class StockPositionResponse(BaseModel):
     buy_price: float
     unrealized_profit_loss: float | None = None
     unrealized_profit_loss_percent: float | None = None
+    fee_adjusted_profit_loss: float | None = None
+    fee_adjusted_profit_loss_percent: float | None = None
+    broker_id: str
+    broker_fee_rate: float
+
+
+class BrokerOptionResponse(BaseModel):
+    broker_id: str
+    name: str
+    buy_fee_rate: float
+    sell_fee_rate: float
+    source_url: str
+
+
+class BrokerSettingResponse(BaseModel):
+    selected_broker: str
+    selected: BrokerOptionResponse
+    brokers: list[BrokerOptionResponse]
+
+
+class BrokerSettingRequest(BaseModel):
+    broker_id: str
 
 
 class BrokerTradingRowResponse(BaseModel):

@@ -37,6 +37,9 @@ class StockProfileSnapshot:
 class QuoteSnapshot:
     symbol: str
     open_price: Decimal | None
+    previous_close: Decimal | None
+    day_high: Decimal | None
+    day_low: Decimal | None
     current_price: Decimal
     change_percent: Decimal | None
     price_updated_at: datetime
@@ -49,6 +52,9 @@ class StockSnapshot:
     market: str
     currency: str
     open_price: Decimal | None
+    previous_close: Decimal | None
+    day_high: Decimal | None
+    day_low: Decimal | None
     current_price: Decimal
     change_percent: Decimal | None
     current_pe: Decimal
@@ -75,6 +81,9 @@ def fetch_stock_snapshot(symbol: str, base_url: str) -> StockSnapshot:
         market=profile.market,
         currency=profile.currency,
         open_price=quote.open_price,
+        previous_close=quote.previous_close,
+        day_high=quote.day_high,
+        day_low=quote.day_low,
         current_price=quote.current_price,
         change_percent=quote.change_percent,
         current_pe=current_pe,
@@ -170,11 +179,20 @@ def _fetch_wantgoo_quote(session: requests.Session, symbol: str, base_url: str) 
     close = _optional_decimal(quote.get("close"))
     open_price = _optional_decimal(quote.get("open"))
     flat = _optional_decimal(quote.get("flat"))
+    high = _optional_decimal(quote.get("high"))
+    low = _optional_decimal(quote.get("low"))
     timestamp = quote.get("time") or quote.get("tradeDate")
     if not any((close, open_price, flat)) or not timestamp:
         raise ValueError(f"Quote data for {symbol} is incomplete.")
 
-    return {"close": close, "open": open_price, "flat": flat, "time": timestamp}
+    return {
+        "close": close,
+        "open": open_price,
+        "flat": flat,
+        "high": high,
+        "low": low,
+        "time": timestamp,
+    }
 
 
 def _profile_snapshot(symbol: str, profile: dict) -> StockProfileSnapshot:
@@ -187,11 +205,17 @@ def _profile_snapshot(symbol: str, profile: dict) -> StockProfileSnapshot:
 
 
 def _quote_snapshot(symbol: str, quote: dict) -> QuoteSnapshot:
-    current_price = _money(quote["close"] or quote["open"] or quote["flat"])
-    open_price = _optional_money(quote["open"])
+    current_price = _money(quote.get("close") or quote.get("open") or quote.get("flat"))
+    open_price = _optional_money(quote.get("open"))
+    previous_close = _optional_money(quote.get("flat"))
+    day_high = _optional_money(quote.get("high"))
+    day_low = _optional_money(quote.get("low"))
     return QuoteSnapshot(
         symbol=symbol,
         open_price=open_price,
+        previous_close=previous_close,
+        day_high=day_high,
+        day_low=day_low,
         current_price=current_price,
         change_percent=_quote_change_percent(current_price, open_price),
         price_updated_at=_timestamp_from_millis(quote["time"]),
