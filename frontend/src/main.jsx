@@ -1013,16 +1013,6 @@ const StockCard = React.forwardRef(function StockCard(
         </div>
       </div>
 
-      {isEtf && (
-        <div className="valuation-table broker-only">
-          <BrokerTradingDisclosure
-            brokerTrading={stock.broker_trading}
-            expanded={brokerTradingExpanded}
-            onToggle={() => setBrokerTradingExpanded((current) => !current)}
-          />
-        </div>
-      )}
-
       {!isEtf && (
         <div className="valuation-table">
           <div className="valuation-row head">
@@ -1034,29 +1024,20 @@ const StockCard = React.forwardRef(function StockCard(
           </div>
           {stock.valuations.length ? (
             stock.valuations.map((valuation) => (
-              <React.Fragment key={`${stock.symbol}-${valuation.eps_type}`}>
-                <div className="valuation-row">
-                  <span>
-                    <strong>{EPS_LABELS[valuation.eps_type] || valuation.eps_type}</strong>
-                    <small>{valuation.eps_period}</small>
-                  </span>
-                  <span className="constant-value">{formatNumber(valuation.eps_value)}</span>
-                  <span className="constant-value">{formatNumber(valuation.estimated_price)}</span>
-                  <span className={percentageToneClass(valuation.difference_percent)}>
-                    <strong>{formatOptionalSignedPercent(valuation.difference_percent)}</strong>
-                  </span>
-                  <span className={percentageToneClass(valuation.cost_difference_percent)}>
-                    <strong>{formatOptionalSignedPercent(valuation.cost_difference_percent)}</strong>
-                  </span>
-                </div>
-                {valuation.eps_type === "LAST_YEAR" && (
-                  <BrokerTradingDisclosure
-                    brokerTrading={stock.broker_trading}
-                    expanded={brokerTradingExpanded}
-                    onToggle={() => setBrokerTradingExpanded((current) => !current)}
-                  />
-                )}
-              </React.Fragment>
+              <div className="valuation-row" key={`${stock.symbol}-${valuation.eps_type}`}>
+                <span>
+                  <strong>{EPS_LABELS[valuation.eps_type] || valuation.eps_type}</strong>
+                  <small>{valuation.eps_period}</small>
+                </span>
+                <span className="constant-value">{formatNumber(valuation.eps_value)}</span>
+                <span className="constant-value">{formatNumber(valuation.estimated_price)}</span>
+                <span className={percentageToneClass(valuation.difference_percent)}>
+                  <strong>{formatOptionalSignedPercent(valuation.difference_percent)}</strong>
+                </span>
+                <span className={percentageToneClass(valuation.cost_difference_percent)}>
+                  <strong>{formatOptionalSignedPercent(valuation.cost_difference_percent)}</strong>
+                </span>
+              </div>
             ))
           ) : (
             <div className="valuation-empty">
@@ -1067,12 +1048,19 @@ const StockCard = React.forwardRef(function StockCard(
         </div>
       )}
 
-      <TechnicalAnalysisDisclosure
-        symbol={stock.symbol}
-        metricUpdatedAt={metric?.price_updated_at}
-        expanded={technicalExpanded}
-        onToggle={() => setTechnicalExpanded((current) => !current)}
-      />
+      <div className="stock-disclosures">
+        <BrokerTradingDisclosure
+          brokerTrading={stock.broker_trading}
+          expanded={brokerTradingExpanded}
+          onToggle={() => setBrokerTradingExpanded((current) => !current)}
+        />
+        <TechnicalAnalysisDisclosure
+          symbol={stock.symbol}
+          metricUpdatedAt={metric?.price_updated_at}
+          expanded={technicalExpanded}
+          onToggle={() => setTechnicalExpanded((current) => !current)}
+        />
+      </div>
     </article>
   );
 });
@@ -1204,7 +1192,10 @@ function DailyCandlestickChart({ candles }) {
       timeScale: {
         borderColor: "rgba(226, 200, 121, 0.18)",
         timeVisible: false,
-        rightOffset: 4,
+        rightOffset: 0,
+        fixLeftEdge: true,
+        fixRightEdge: true,
+        lockVisibleTimeRangeOnResize: true,
       },
       handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
       handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
@@ -1250,9 +1241,45 @@ function DailyCandlestickChart({ candles }) {
       setSelectedCandle(candleByDate.get(dateKey) || latestCandle);
     }
 
+    const timeScale = chart.timeScale();
+    const fullLogicalRange = { from: -0.5, to: candles.length - 0.5 };
+    let restoringFullRange = false;
+    let resizeFrame = 0;
+
+    function syncMinimumBarSpacing() {
+      const plotWidth = Math.max(1, timeScale.width());
+      chart.applyOptions({
+        timeScale: {
+          minBarSpacing: Math.max(0.5, plotWidth / candles.length),
+        },
+      });
+    }
+
+    function clampVisibleRange(range) {
+      if (!range || restoringFullRange || range.to - range.from <= candles.length + 0.01) {
+        return;
+      }
+      restoringFullRange = true;
+      timeScale.setVisibleLogicalRange(fullLogicalRange);
+      window.requestAnimationFrame(() => {
+        restoringFullRange = false;
+      });
+    }
+
+    const resizeObserver = new ResizeObserver(() => {
+      window.cancelAnimationFrame(resizeFrame);
+      resizeFrame = window.requestAnimationFrame(syncMinimumBarSpacing);
+    });
+
     chart.subscribeCrosshairMove(handleCrosshairMove);
-    chart.timeScale().fitContent();
+    timeScale.subscribeVisibleLogicalRangeChange(clampVisibleRange);
+    resizeObserver.observe(container);
+    syncMinimumBarSpacing();
+    timeScale.setVisibleLogicalRange(fullLogicalRange);
     return () => {
+      window.cancelAnimationFrame(resizeFrame);
+      resizeObserver.disconnect();
+      timeScale.unsubscribeVisibleLogicalRangeChange(clampVisibleRange);
       chart.unsubscribeCrosshairMove(handleCrosshairMove);
       chart.remove();
     };
@@ -1267,10 +1294,7 @@ function DailyCandlestickChart({ candles }) {
           <strong>{formatTradingDate(summary?.date)}</strong>
           {summary?.is_provisional && <em>暫定 K 棒</em>}
         </div>
-        <TechnicalSummaryValue label="開" value={summary?.open} />
-        <TechnicalSummaryValue label="高" value={summary?.high} />
-        <TechnicalSummaryValue label="低" value={summary?.low} />
-        <TechnicalSummaryValue label="收" value={summary?.close} />
+        <TechnicalSummaryValue label="收盤" value={summary?.close} accent />
         <TechnicalSummaryValue label="MA20" value={summary?.ma20} accent />
       </div>
       <div className="technical-chart" ref={containerRef} />
@@ -1282,7 +1306,7 @@ function TechnicalSummaryValue({ label, value, accent = false }) {
   return (
     <div>
       <span>{label}</span>
-      <strong className={accent ? "ma20-value" : ""}>{formatOptionalNumber(value)}</strong>
+      <strong className={accent ? "technical-accent-value" : ""}>{formatOptionalNumber(value)}</strong>
     </div>
   );
 }
