@@ -5,7 +5,8 @@ from decimal import Decimal
 
 
 DEFAULT_BROKER_ID = "CATHAY"
-SECURITIES_TRANSACTION_TAX_RATE = Decimal("0.003")
+STOCK_TRANSACTION_TAX_RATE = Decimal("0.003")
+ETF_TRANSACTION_TAX_RATE = Decimal("0.001")
 
 
 @dataclass(frozen=True)
@@ -38,3 +39,7 @@ def get_broker(broker_id: str) -> BrokerConfig:
 
 def broker_options() -> list[BrokerConfig]:
     return list(BROKERS.values())
+
+
+def transaction_tax_rate(asset_type: str) -> Decimal:
+    return ETF_TRANSACTION_TAX_RATE if asset_type.upper() == "ETF" else STOCK_TRANSACTION_TAX_RATE

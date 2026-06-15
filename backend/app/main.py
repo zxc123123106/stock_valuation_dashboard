@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from .brokers import BrokerConfig, SECURITIES_TRANSACTION_TAX_RATE, broker_options, get_broker
+from .brokers import BrokerConfig, broker_options, get_broker, transaction_tax_rate
 from .config import get_settings
 from .database import (
     CrawlerLog,
@@ -200,6 +200,7 @@ def _position_response(
     position: StockPosition | None,
     metric: StockMetric | None,
     broker: BrokerConfig,
+    asset_type: str,
 ) -> StockPositionResponse | None:
     if not position:
         return None
@@ -212,8 +213,9 @@ def _position_response(
         profit_loss = metric.current_price - position.buy_price
         profit_loss_percent = _percent(profit_loss, position.buy_price)
         effective_buy_cost = position.buy_price * (Decimal("1") + broker.buy_fee_rate)
+        tax_rate = transaction_tax_rate(asset_type)
         estimated_sell_proceeds = metric.current_price * (
-            Decimal("1") - broker.sell_fee_rate - SECURITIES_TRANSACTION_TAX_RATE
+            Decimal("1") - broker.sell_fee_rate - tax_rate
         )
         fee_adjusted_profit_loss = quantize_money(estimated_sell_proceeds - effective_buy_cost)
         fee_adjusted_profit_loss_percent = _percent(fee_adjusted_profit_loss, effective_buy_cost)
@@ -307,7 +309,7 @@ def _stock_response(stock: Stock, session: Session) -> StockResponse:
         )
         if metric
         else None,
-        position=_position_response(position, metric, broker),
+        position=_position_response(position, metric, broker, stock.asset_type),
         broker_trading=_broker_trading_response(stock, session),
         valuations=[_valuation_response(valuation, position.buy_price if position else None) for valuation in valuations],
     )
