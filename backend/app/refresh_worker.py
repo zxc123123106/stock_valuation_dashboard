@@ -12,15 +12,18 @@ from .database import (
     SessionLocal,
     Stock,
     StockBrokerTrading,
+    StockDailyPrice,
     StockEPS,
     StockMetric,
     StockRefreshState,
     apply_broker_trading_snapshot,
+    apply_daily_price_snapshots,
     apply_layered_stock_refresh,
     cleanup_crawler_logs_if_due,
     log_crawler_result,
     next_display_order,
 )
+from .finmind_daily import fetch_daily_prices
 from .histock_eps import fetch_stock_eps
 from .wantgoo import (
     derive_pe,
@@ -58,9 +61,10 @@ class RefreshJob:
 
 
 class BackgroundRefreshManager:
-    def __init__(self, interval_seconds: int, wantgoo_base_url: str) -> None:
+    def __init__(self, interval_seconds: int, wantgoo_base_url: str, finmind_token: str | None = None) -> None:
         self.interval_seconds = interval_seconds
         self.wantgoo_base_url = wantgoo_base_url
+        self.finmind_token = finmind_token
         self._queue: asyncio.Queue[RefreshJob] | None = None
         self._queued_symbols: set[str] = set()
         self._queued_force_full: dict[str, bool] = {}
@@ -297,6 +301,7 @@ class BackgroundRefreshManager:
                 self.wantgoo_base_url,
                 started_at,
                 force_full=force_full,
+                finmind_token=self.finmind_token,
             )
         except Exception as exc:
             finished_at = datetime.now(UTC)
@@ -653,6 +658,21 @@ def _broker_trading_due(symbol: str, now: datetime) -> bool:
         return latest_broker_trading is None or not _is_same_day(latest_broker_trading.fetched_at, now)
 
 
+def _daily_prices_due(symbol: str, now: datetime) -> bool:
+    with SessionLocal() as session:
+        stock = session.scalar(select(Stock).where(Stock.symbol == symbol))
+        if not stock:
+            return False
+
+        latest_fetched_at = session.scalar(
+            select(StockDailyPrice.fetched_at)
+            .where(StockDailyPrice.stock_id == stock.id)
+            .order_by(StockDailyPrice.fetched_at.desc())
+            .limit(1)
+        )
+        return latest_fetched_at is None or not _is_same_day(latest_fetched_at, now)
+
+
 def _ensure_active_placeholder(symbol: str) -> None:
     now = datetime.now(UTC)
     with SessionLocal() as session:
@@ -694,12 +714,14 @@ def _refresh_symbol_sync(
     started_at: datetime,
     *,
     force_full: bool = False,
+    finmind_token: str | None = None,
 ) -> str:
     if not _active_stock_exists(symbol):
         return "標的已刪除，略過背景更新"
 
     pe_due, eps_due = (True, True) if force_full else _refresh_due(symbol, started_at)
     broker_trading_due = True if force_full else _broker_trading_due(symbol, started_at)
+    daily_prices_due = True if force_full else _daily_prices_due(symbol, started_at)
     calculated_at = datetime.now(UTC)
     messages = ["全量刷新：股價已更新" if force_full else "股價已更新"]
     source_parts = ["WantGoo quote"]
@@ -719,6 +741,7 @@ def _refresh_symbol_sync(
     eps_rows = None
     eps_updated_at = None
     broker_trading = None
+    daily_prices = None
 
     if profile.asset_type == "ETF":
         messages.append("ETF 僅更新現價")
@@ -772,6 +795,20 @@ def _refresh_symbol_sync(
     else:
         messages.append("主力進出沿用今日快取")
 
+    if daily_prices_due:
+        try:
+            daily_prices = fetch_daily_prices(
+                symbol,
+                token=finmind_token,
+                end_date=started_at.astimezone(TAIPEI_TZ).date(),
+            )
+        except Exception as exc:
+            messages.append(f"日線更新失敗，沿用快取：{exc}")
+        else:
+            messages.append("日線與 MA20 基礎資料已按日更新")
+    else:
+        messages.append("日線沿用今日快取")
+
     source = " + ".join(source_parts)
     with SessionLocal() as session:
         try:
@@ -794,6 +831,8 @@ def _refresh_symbol_sync(
             )
             if broker_trading:
                 apply_broker_trading_snapshot(session, stock, broker_trading)
+            if daily_prices:
+                apply_daily_price_snapshots(session, stock, daily_prices)
             log_crawler_result(
                 session=session,
                 job_name=f"market_refresh:{symbol}",

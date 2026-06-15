@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Generator
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, create_engine, delete, func, or_, select, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, create_engine, delete, func, or_, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -79,6 +79,7 @@ class Stock(Base):
     valuations: Mapped[list["StockValuation"]] = relationship(back_populates="stock")
     position: Mapped["StockPosition | None"] = relationship(back_populates="stock", uselist=False)
     broker_trading: Mapped["StockBrokerTrading | None"] = relationship(back_populates="stock", uselist=False)
+    daily_prices: Mapped[list["StockDailyPrice"]] = relationship(back_populates="stock")
 
 
 class StockMetric(Base):
@@ -190,6 +191,26 @@ class StockBrokerTradingRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     broker_trading: Mapped[StockBrokerTrading] = relationship(back_populates="rows")
+
+
+class StockDailyPrice(Base):
+    __tablename__ = "stock_daily_prices"
+    __table_args__ = (UniqueConstraint("stock_id", "trade_date", name="uq_stock_daily_price_date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    open_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    high_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    low_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    close_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    volume: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(120))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    stock: Mapped[Stock] = relationship(back_populates="daily_prices")
 
 
 class CrawlerLog(Base):
@@ -720,6 +741,35 @@ def apply_broker_trading_snapshot(session: Session, stock: Stock, snapshot) -> N
                     net_volume=row.net_volume,
                 )
             )
+
+
+def apply_daily_price_snapshots(session: Session, stock: Stock, snapshots: list) -> None:
+    if not snapshots:
+        return
+
+    existing_rows = {
+        row.trade_date: row
+        for row in session.scalars(
+            select(StockDailyPrice).where(
+                StockDailyPrice.stock_id == stock.id,
+                StockDailyPrice.trade_date >= snapshots[0].trade_date,
+            )
+        ).all()
+    }
+    now = datetime.now(UTC)
+    for snapshot in snapshots:
+        row = existing_rows.get(snapshot.trade_date)
+        if not row:
+            row = StockDailyPrice(stock_id=stock.id, trade_date=snapshot.trade_date)
+            session.add(row)
+        row.open_price = snapshot.open_price
+        row.high_price = snapshot.high_price
+        row.low_price = snapshot.low_price
+        row.close_price = snapshot.close_price
+        row.volume = snapshot.volume
+        row.source = snapshot.source
+        row.fetched_at = snapshot.fetched_at
+        row.updated_at = now
 
 
 def next_display_order(session: Session) -> int:

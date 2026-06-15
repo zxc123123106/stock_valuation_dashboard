@@ -19,6 +19,12 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
+  CandlestickSeries,
+  CrosshairMode,
+  LineSeries,
+  createChart,
+} from "lightweight-charts";
+import {
   AlertCircle,
   ArrowDown,
   ArrowUp,
@@ -104,6 +110,34 @@ function percentageToneClass(value) {
     return "";
   }
   return value >= 0 ? "percentage-positive" : "percentage-negative";
+}
+
+function comparisonPercent(currentPrice, indicatorPrice) {
+  if (
+    currentPrice === null ||
+    currentPrice === undefined ||
+    indicatorPrice === null ||
+    indicatorPrice === undefined ||
+    Number(indicatorPrice) === 0
+  ) {
+    return null;
+  }
+  return ((Number(currentPrice) - Number(indicatorPrice)) / Number(indicatorPrice)) * 100;
+}
+
+function comparisonToneClass(value) {
+  if (value === null || value === undefined || value === 0) {
+    return "percentage-zero";
+  }
+  return percentageToneClass(value);
+}
+
+function formatTradingDate(value) {
+  if (!value) {
+    return "待更新";
+  }
+  const [year, month, day] = String(value).split("-");
+  return year && month && day ? `${year}/${month}/${day}` : String(value);
 }
 
 function formatDate(value) {
@@ -756,7 +790,10 @@ function App() {
         )}
       </section>
 
-      <footer>本看板僅用於資料整理與估值比較，不構成任何投資建議。</footer>
+      <footer>
+        <span>本看板僅用於資料整理與估值比較，不構成任何投資建議。</span>
+        <a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">Charts by TradingView</a>
+      </footer>
     </main>
   );
 }
@@ -844,11 +881,13 @@ const StockCard = React.forwardRef(function StockCard(
   const statusLabel = REFRESH_STATUS_LABELS[refreshState?.status] || refreshState?.status;
   const isEtf = stock.asset_type === "ETF";
   const [brokerTradingExpanded, setBrokerTradingExpanded] = useState(false);
+  const [technicalExpanded, setTechnicalExpanded] = useState(false);
 
   return (
     <article
       ref={ref}
       style={style}
+      data-symbol={stock.symbol}
       className={`stock-card${dragging ? " dragging" : ""}${overlay ? " overlay" : ""}`}
     >
       <header className="stock-header">
@@ -937,10 +976,10 @@ const StockCard = React.forwardRef(function StockCard(
             <strong>{formatOptionalNumber(metric?.current_price)}</strong>
           </div>
           <div className="quote-comparison-grid">
-            <QuoteComparison label="開盤" value={metric?.open_price} />
-            <QuoteComparison label="昨收" value={metric?.previous_close} />
-            <QuoteComparison label="最高" value={metric?.day_high} />
-            <QuoteComparison label="最低" value={metric?.day_low} />
+            <QuoteComparison label="開盤" value={metric?.open_price} currentPrice={metric?.current_price} />
+            <QuoteComparison label="昨收" value={metric?.previous_close} currentPrice={metric?.current_price} />
+            <QuoteComparison label="最高" value={metric?.day_high} currentPrice={metric?.current_price} />
+            <QuoteComparison label="最低" value={metric?.day_low} currentPrice={metric?.current_price} />
           </div>
         </div>
         {!isEtf && (
@@ -1027,15 +1066,223 @@ const StockCard = React.forwardRef(function StockCard(
           )}
         </div>
       )}
+
+      <TechnicalAnalysisDisclosure
+        symbol={stock.symbol}
+        metricUpdatedAt={metric?.price_updated_at}
+        expanded={technicalExpanded}
+        onToggle={() => setTechnicalExpanded((current) => !current)}
+      />
     </article>
   );
 });
 
-function QuoteComparison({ label, value }) {
+function QuoteComparison({ label, value, currentPrice }) {
+  const percent = comparisonPercent(currentPrice, value);
   return (
     <div className="quote-comparison-item">
       <span className="metric-label">{label}</span>
-      <strong>{formatOptionalNumber(value)}</strong>
+      <div className="quote-comparison-value">
+        <strong>{formatOptionalNumber(value)}</strong>
+        <span className={comparisonToneClass(percent)}>{formatOptionalSignedPercent(percent)}</span>
+      </div>
+    </div>
+  );
+}
+
+function TechnicalAnalysisDisclosure({ symbol, metricUpdatedAt, expanded, onToggle }) {
+  const [analysis, setAnalysis] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!expanded) {
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    async function loadTechnicalAnalysis() {
+      setLoading(true);
+      setError("");
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/stocks/${symbol}/technical-analysis?limit=120`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(await parseError(response));
+        }
+        setAnalysis(await response.json());
+      } catch (requestError) {
+        if (requestError.name !== "AbortError") {
+          setError(requestError.message);
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadTechnicalAnalysis();
+    return () => controller.abort();
+  }, [expanded, metricUpdatedAt, symbol]);
+
+  return (
+    <div className="technical-analysis">
+      <button className="technical-toggle" type="button" onClick={onToggle} aria-expanded={expanded}>
+        <span>
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          技術分析
+        </span>
+        <small>日線 · MA20</small>
+      </button>
+      {expanded && (
+        <div className="technical-panel">
+          {loading && !analysis ? (
+            <div className="valuation-empty">
+              <Loader2 className="spin" size={16} />
+              日線載入中
+            </div>
+          ) : error && !analysis ? (
+            <div className="valuation-empty technical-error">
+              <AlertCircle size={16} />
+              {error}
+            </div>
+          ) : analysis?.candles?.length ? (
+            <>
+              <DailyCandlestickChart candles={analysis.candles} />
+              <div className="technical-source">
+                <span>{analysis.source}</span>
+                <span>{analysis.fetched_at ? formatDate(analysis.fetched_at) : "待更新"}</span>
+              </div>
+            </>
+          ) : (
+            <div className="valuation-empty">
+              <Wifi size={15} />
+              日線快取待更新
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DailyCandlestickChart({ candles }) {
+  const containerRef = useRef(null);
+  const latestCandle = candles[candles.length - 1] || null;
+  const [selectedCandle, setSelectedCandle] = useState(latestCandle);
+
+  useEffect(() => {
+    setSelectedCandle(latestCandle);
+  }, [latestCandle]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !candles.length) {
+      return undefined;
+    }
+
+    const candleByDate = new Map(candles.map((candle) => [candle.date, candle]));
+    const chart = createChart(container, {
+      autoSize: true,
+      layout: {
+        background: { color: "#111110" },
+        textColor: "#9f988d",
+        attributionLogo: false,
+      },
+      grid: {
+        vertLines: { color: "rgba(226, 200, 121, 0.07)" },
+        horzLines: { color: "rgba(226, 200, 121, 0.07)" },
+      },
+      crosshair: {
+        mode: CrosshairMode.Magnet,
+        vertLine: { color: "rgba(226, 200, 121, 0.58)", labelBackgroundColor: "#755f27" },
+        horzLine: { color: "rgba(226, 200, 121, 0.58)", labelBackgroundColor: "#755f27" },
+      },
+      rightPriceScale: { borderColor: "rgba(226, 200, 121, 0.18)" },
+      timeScale: {
+        borderColor: "rgba(226, 200, 121, 0.18)",
+        timeVisible: false,
+        rightOffset: 4,
+      },
+      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+      handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+    });
+
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: "#ef8c7f",
+      downColor: "#57d3a0",
+      borderVisible: false,
+      wickUpColor: "#ef8c7f",
+      wickDownColor: "#57d3a0",
+      priceLineVisible: false,
+    });
+    candleSeries.setData(candles.map((candle) => ({
+      time: candle.date,
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+    })));
+
+    const ma20Series = chart.addSeries(LineSeries, {
+      color: "#e2c879",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: false,
+    });
+    ma20Series.setData(
+      candles
+        .filter((candle) => candle.ma20 !== null && candle.ma20 !== undefined)
+        .map((candle) => ({ time: candle.date, value: candle.ma20 })),
+    );
+
+    function handleCrosshairMove(param) {
+      if (!param.time) {
+        setSelectedCandle(latestCandle);
+        return;
+      }
+      const dateKey = typeof param.time === "string"
+        ? param.time
+        : `${param.time.year}-${String(param.time.month).padStart(2, "0")}-${String(param.time.day).padStart(2, "0")}`;
+      setSelectedCandle(candleByDate.get(dateKey) || latestCandle);
+    }
+
+    chart.subscribeCrosshairMove(handleCrosshairMove);
+    chart.timeScale().fitContent();
+    return () => {
+      chart.unsubscribeCrosshairMove(handleCrosshairMove);
+      chart.remove();
+    };
+  }, [candles, latestCandle]);
+
+  const summary = selectedCandle || latestCandle;
+  return (
+    <div className="technical-chart-shell">
+      <div className="technical-summary">
+        <div className="technical-summary-date">
+          <span>日期</span>
+          <strong>{formatTradingDate(summary?.date)}</strong>
+          {summary?.is_provisional && <em>暫定 K 棒</em>}
+        </div>
+        <TechnicalSummaryValue label="開" value={summary?.open} />
+        <TechnicalSummaryValue label="高" value={summary?.high} />
+        <TechnicalSummaryValue label="低" value={summary?.low} />
+        <TechnicalSummaryValue label="收" value={summary?.close} />
+        <TechnicalSummaryValue label="MA20" value={summary?.ma20} accent />
+      </div>
+      <div className="technical-chart" ref={containerRef} />
+    </div>
+  );
+}
+
+function TechnicalSummaryValue({ label, value, accent = false }) {
+  return (
+    <div>
+      <span>{label}</span>
+      <strong className={accent ? "ma20-value" : ""}>{formatOptionalNumber(value)}</strong>
     </div>
   );
 }

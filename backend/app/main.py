@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from decimal import Decimal, InvalidOperation
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
+from zoneinfo import ZoneInfo
 
 from .brokers import BrokerConfig, broker_options, get_broker, transaction_tax_rate
 from .config import get_settings
@@ -17,6 +18,7 @@ from .database import (
     Stock,
     StockBrokerTrading,
     StockBrokerTradingRow,
+    StockDailyPrice,
     StockEPS,
     StockMetric,
     StockPosition,
@@ -45,6 +47,8 @@ from .schemas import (
     StockReorderRequest,
     StockResponse,
     StockValuationResponse,
+    TechnicalAnalysisResponse,
+    TechnicalCandleResponse,
 )
 from .refresh_worker import BackgroundRefreshManager
 from .valuation import quantize_money, valuation_status
@@ -55,7 +59,12 @@ settings = get_settings()
 refresh_manager = BackgroundRefreshManager(
     interval_seconds=settings.background_refresh_seconds,
     wantgoo_base_url=settings.wantgoo_base_url,
+    finmind_token=settings.finmind_token,
 )
+
+TAIPEI_TZ = ZoneInfo("Asia/Taipei")
+MARKET_OPEN_TIME = time(9, 0)
+MARKET_CLOSE_TIME = time(14, 0)
 
 
 @asynccontextmanager
@@ -212,11 +221,13 @@ def _position_response(
     if metric:
         profit_loss = metric.current_price - position.buy_price
         profit_loss_percent = _percent(profit_loss, position.buy_price)
-        effective_buy_cost = position.buy_price * (Decimal("1") + broker.buy_fee_rate)
+
+        buy_fee = position.buy_price * broker.buy_fee_rate
+        sell_fee = metric.current_price * broker.sell_fee_rate
         tax_rate = transaction_tax_rate(asset_type)
-        estimated_sell_proceeds = metric.current_price * (
-            Decimal("1") - broker.sell_fee_rate - tax_rate
-        )
+        transaction_tax = metric.current_price * tax_rate
+        effective_buy_cost = position.buy_price + buy_fee
+        estimated_sell_proceeds = metric.current_price - sell_fee - transaction_tax
         fee_adjusted_profit_loss = quantize_money(estimated_sell_proceeds - effective_buy_cost)
         fee_adjusted_profit_loss_percent = _percent(fee_adjusted_profit_loss, effective_buy_cost)
 
@@ -315,6 +326,99 @@ def _stock_response(stock: Stock, session: Session) -> StockResponse:
     )
 
 
+def _technical_analysis_response(stock: Stock, session: Session, limit: int) -> TechnicalAnalysisResponse:
+    rows = session.scalars(
+        select(StockDailyPrice)
+        .where(StockDailyPrice.stock_id == stock.id)
+        .order_by(StockDailyPrice.trade_date.desc())
+        .limit(limit + 19)
+    ).all()
+    candles = [
+        {
+            "date": row.trade_date,
+            "open": row.open_price,
+            "high": row.high_price,
+            "low": row.low_price,
+            "close": row.close_price,
+            "volume": row.volume,
+            "source": row.source,
+            "fetched_at": row.fetched_at,
+            "is_provisional": False,
+        }
+        for row in reversed(rows)
+    ]
+
+    metric = _latest_metric(session, stock.id)
+    now = datetime.now(TAIPEI_TZ)
+    if metric:
+        metric_time = _as_taipei(metric.price_updated_at)
+        latest_historical_date = candles[-1]["date"] if candles else None
+        should_merge_provisional = (
+            latest_historical_date is None
+            or metric_time.date() > latest_historical_date
+            or (_market_is_open(now) and metric_time.date() == now.date())
+        )
+        if should_merge_provisional:
+            current_price = metric.current_price
+            open_price = metric.open_price or current_price
+            provisional = {
+                "date": metric_time.date(),
+                "open": open_price,
+                "high": metric.day_high or max(open_price, current_price),
+                "low": metric.day_low or min(open_price, current_price),
+                "close": current_price,
+                "volume": None,
+                "source": "WantGoo provisional quote",
+                "fetched_at": metric.price_updated_at,
+                "is_provisional": True,
+            }
+            candles = [candle for candle in candles if candle["date"] != provisional["date"]]
+            candles.append(provisional)
+
+    rolling_closes: list[Decimal] = []
+    response_candles = []
+    for candle in candles:
+        rolling_closes.append(candle["close"])
+        if len(rolling_closes) > 20:
+            rolling_closes.pop(0)
+        ma20 = sum(rolling_closes, Decimal("0")) / Decimal("20") if len(rolling_closes) == 20 else None
+        response_candles.append(
+            TechnicalCandleResponse(
+                date=candle["date"],
+                open=_float(candle["open"]),
+                high=_float(candle["high"]),
+                low=_float(candle["low"]),
+                close=_float(candle["close"]),
+                volume=candle["volume"],
+                ma20=_float(ma20) if ma20 is not None else None,
+                is_provisional=candle["is_provisional"],
+            )
+        )
+
+    visible_candles = response_candles[-limit:]
+    visible_dates = {candle.date for candle in visible_candles}
+    visible_raw = [candle for candle in candles if candle["date"] in visible_dates]
+    fetched_at = max((candle["fetched_at"] for candle in visible_raw), default=None)
+    sources = list(dict.fromkeys(candle["source"] for candle in visible_raw))
+    return TechnicalAnalysisResponse(
+        symbol=stock.symbol,
+        interval="1d",
+        source=" + ".join(sources) if sources else "FinMind TaiwanStockPrice",
+        fetched_at=fetched_at,
+        candles=visible_candles,
+    )
+
+
+def _as_taipei(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(TAIPEI_TZ)
+
+
+def _market_is_open(now: datetime) -> bool:
+    return now.weekday() < 5 and MARKET_OPEN_TIME <= now.time().replace(tzinfo=None) < MARKET_CLOSE_TIME
+
+
 @app.get("/api/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     ping_database()
@@ -330,7 +434,7 @@ def health() -> HealthResponse:
 async def metadata(session: Session = Depends(get_session)) -> MetadataResponse:
     refresh_status = await refresh_manager.snapshot()
     return MetadataResponse(
-        data_source="WantGoo quote + TWSE OpenAPI PE + HiStock EPS + Yahoo broker trading",
+        data_source="WantGoo quote + TWSE OpenAPI PE + HiStock EPS + Yahoo broker trading + FinMind daily prices",
         api_version=settings.api_version,
         stocks_count=len(_active_stocks(session)),
         valuations_count=_active_valuations_count(session),
@@ -418,6 +522,25 @@ def get_stock(symbol: str, session: Session = Depends(get_session)) -> StockResp
     return _stock_response(stock, session)
 
 
+@app.get("/api/stocks/{symbol}/technical-analysis", response_model=TechnicalAnalysisResponse)
+def get_technical_analysis(
+    symbol: str,
+    limit: int = Query(default=120, ge=20, le=250),
+    session: Session = Depends(get_session),
+) -> TechnicalAnalysisResponse:
+    try:
+        normalized_symbol = normalize_symbol(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    stock = session.scalar(
+        select(Stock).where(Stock.symbol == normalized_symbol, Stock.is_active.is_(True))
+    )
+    if not stock:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    return _technical_analysis_response(stock, session, limit)
+
+
 @app.delete("/api/stocks/{symbol}", response_model=StockDeleteResponse)
 async def delete_stock(symbol: str, session: Session = Depends(get_session)) -> StockDeleteResponse:
     try:
@@ -441,6 +564,7 @@ async def delete_stock(symbol: str, session: Session = Depends(get_session)) -> 
     session.execute(delete(StockMetric).where(StockMetric.stock_id == stock.id))
     session.execute(delete(StockEPS).where(StockEPS.stock_id == stock.id))
     session.execute(delete(StockValuation).where(StockValuation.stock_id == stock.id))
+    session.execute(delete(StockDailyPrice).where(StockDailyPrice.stock_id == stock.id))
     session.execute(delete(StockRefreshState).where(StockRefreshState.symbol == normalized_symbol))
     session.execute(delete(CrawlerLog).where(CrawlerLog.job_name == f"market_refresh:{normalized_symbol}"))
     session.delete(stock)

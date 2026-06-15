@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel
 
@@ -100,6 +100,25 @@ class BrokerTradingResponse(BaseModel):
     sell_brokers: list[BrokerTradingRowResponse]
     source: str
     fetched_at: datetime
+
+
+class TechnicalCandleResponse(BaseModel):
+    date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int | None = None
+    ma20: float | None = None
+    is_provisional: bool = False
+
+
+class TechnicalAnalysisResponse(BaseModel):
+    symbol: str
+    interval: str
+    source: str
+    fetched_at: datetime | None = None
+    candles: list[TechnicalCandleResponse]
 
 
 class StockResponse(BaseModel):
