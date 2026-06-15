@@ -225,7 +225,7 @@ h1 {
 
 .broker-select-field {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   justify-self: end;
   width: min(220px, 100%);
@@ -245,13 +245,29 @@ h1 {
 }
 
 .broker-select-field select {
+  appearance: none;
+  -webkit-appearance: none;
   width: 100%;
   min-width: 0;
+  min-height: 40px;
+  padding: 0;
   border: 0;
+  border-radius: 0;
   outline: 0;
-  background: var(--surface);
+  background: transparent;
   color: var(--text-strong);
+  font-weight: 650;
   cursor: pointer;
+}
+
+.broker-select-field select::-ms-expand {
+  display: none;
+}
+
+.broker-select-icon {
+  flex: 0 0 auto;
+  color: var(--text-strong);
+  pointer-events: none;
 }
 
 .notice {

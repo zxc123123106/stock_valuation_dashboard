@@ -675,6 +675,7 @@ function App() {
               </option>
             ))}
           </select>
+          <ChevronDown className="broker-select-icon" size={17} aria-hidden="true" />
         </label>
       </form>
 
