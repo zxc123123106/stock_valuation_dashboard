@@ -749,7 +749,7 @@ h1 {
 
 .broker-ranking-row {
   display: grid;
-  grid-template-columns: 28px minmax(92px, 1fr) repeat(3, minmax(54px, 0.58fr));
+  grid-template-columns: 32px minmax(92px, 1fr) repeat(3, minmax(64px, 0.62fr));
   gap: 8px;
   align-items: center;
   padding: 8px 0;
@@ -766,6 +766,33 @@ h1 {
 .broker-ranking-row span:nth-child(n + 3) {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.broker-ranking-head {
+  padding: 7px 0;
+  border-top: 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.broker-ranking-head span:first-child {
+  color: var(--muted);
+}
+
+.broker-buy {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.broker-sell {
+  color: var(--success);
+  font-weight: 650;
+}
+
+.broker-trade-volume {
+  color: var(--gold-strong);
+  font-weight: 650;
 }
 
 .broker-source {
