@@ -80,6 +80,9 @@ class Stock(Base):
     position: Mapped["StockPosition | None"] = relationship(back_populates="stock", uselist=False)
     broker_trading: Mapped["StockBrokerTrading | None"] = relationship(back_populates="stock", uselist=False)
     daily_prices: Mapped[list["StockDailyPrice"]] = relationship(back_populates="stock")
+    pe_history: Mapped[list["StockPEHistory"]] = relationship(back_populates="stock")
+    monthly_revenues: Mapped[list["StockMonthlyRevenue"]] = relationship(back_populates="stock")
+    financial_quarters: Mapped[list["StockFinancialQuarter"]] = relationship(back_populates="stock")
 
 
 class StockMetric(Base):
@@ -94,6 +97,10 @@ class StockMetric(Base):
     current_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     change_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
     current_pe: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    pe_average_3y: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    pe_min_3y: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    pe_max_3y: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    pe_vs_average_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
     price_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     pe_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     source: Mapped[str] = mapped_column(String(120))
@@ -213,6 +220,62 @@ class StockDailyPrice(Base):
     stock: Mapped[Stock] = relationship(back_populates="daily_prices")
 
 
+class StockPEHistory(Base):
+    __tablename__ = "stock_pe_history"
+    __table_args__ = (UniqueConstraint("stock_id", "trade_date", name="uq_stock_pe_history_date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    per: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    pbr: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    dividend_yield: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    source: Mapped[str] = mapped_column(String(120))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    stock: Mapped[Stock] = relationship(back_populates="pe_history")
+
+
+class StockMonthlyRevenue(Base):
+    __tablename__ = "stock_monthly_revenues"
+    __table_args__ = (UniqueConstraint("stock_id", "month_date", name="uq_stock_monthly_revenue_date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    month_date: Mapped[date] = mapped_column(Date, index=True)
+    revenue: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    mom_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    yoy_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    source: Mapped[str] = mapped_column(String(120))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    stock: Mapped[Stock] = relationship(back_populates="monthly_revenues")
+
+
+class StockFinancialQuarter(Base):
+    __tablename__ = "stock_financial_quarters"
+    __table_args__ = (UniqueConstraint("stock_id", "quarter_date", name="uq_stock_financial_quarter_date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    quarter_date: Mapped[date] = mapped_column(Date, index=True)
+    eps: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    revenue: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    gross_profit: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    operating_income: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    net_income: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    source: Mapped[str] = mapped_column(String(120))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    stock: Mapped[Stock] = relationship(back_populates="financial_quarters")
+
+
 class CrawlerLog(Base):
     __tablename__ = "crawler_logs"
 
@@ -268,9 +331,11 @@ def init_database() -> None:
     ensure_stock_display_order_column()
     ensure_stock_asset_type_column()
     ensure_stock_metric_quote_columns()
+    ensure_analysis_cache_columns()
     with SessionLocal() as session:
         backfill_display_order(session)
         remove_unsupported_eps(session)
+        remove_legacy_histock_eps(session)
         seed_demo_data(session)
         seed_app_settings(session)
     run_startup_maintenance()
@@ -313,6 +378,68 @@ def ensure_stock_metric_quote_columns() -> None:
             connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN day_low NUMERIC(12, 2)"))
         if "change_percent" not in columns:
             connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN change_percent NUMERIC(8, 2)"))
+        if "pe_average_3y" not in columns:
+            connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN pe_average_3y NUMERIC(12, 2)"))
+        if "pe_min_3y" not in columns:
+            connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN pe_min_3y NUMERIC(12, 2)"))
+        if "pe_max_3y" not in columns:
+            connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN pe_max_3y NUMERIC(12, 2)"))
+        if "pe_vs_average_percent" not in columns:
+            connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN pe_vs_average_percent NUMERIC(8, 2)"))
+
+
+def ensure_analysis_cache_columns() -> None:
+    with engine.begin() as connection:
+        _ensure_table_columns(
+            connection,
+            "stock_pe_history",
+            {
+                "pbr": "NUMERIC(12, 2)",
+                "dividend_yield": "NUMERIC(8, 2)",
+                "source": "VARCHAR(120) NOT NULL DEFAULT 'FinMind TaiwanStockPER'",
+                "fetched_at": "DATETIME",
+                "created_at": "DATETIME",
+                "updated_at": "DATETIME",
+            },
+        )
+        _ensure_table_columns(
+            connection,
+            "stock_monthly_revenues",
+            {
+                "mom_percent": "NUMERIC(8, 2)",
+                "yoy_percent": "NUMERIC(8, 2)",
+                "source": "VARCHAR(120) NOT NULL DEFAULT 'FinMind TaiwanStockMonthRevenue'",
+                "fetched_at": "DATETIME",
+                "created_at": "DATETIME",
+                "updated_at": "DATETIME",
+            },
+        )
+        _ensure_table_columns(
+            connection,
+            "stock_financial_quarters",
+            {
+                "revenue": "NUMERIC(18, 2)",
+                "gross_profit": "NUMERIC(18, 2)",
+                "operating_income": "NUMERIC(18, 2)",
+                "net_income": "NUMERIC(18, 2)",
+                "source": "VARCHAR(120) NOT NULL DEFAULT 'FinMind TaiwanStockFinancialStatements'",
+                "fetched_at": "DATETIME",
+                "created_at": "DATETIME",
+                "updated_at": "DATETIME",
+            },
+        )
+
+
+def _ensure_table_columns(connection, table_name: str, column_definitions: dict[str, str]) -> None:
+    columns = {
+        row._mapping["name"]
+        for row in connection.execute(text(f"PRAGMA table_info({table_name})"))
+    }
+    if not columns:
+        return
+    for column_name, column_definition in column_definitions.items():
+        if column_name not in columns:
+            connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"))
 
 
 def seed_app_settings(session: Session) -> None:
@@ -385,7 +512,7 @@ def replace_legacy_demo_data(session: Session, stock: Stock) -> None:
 
 def create_seed_snapshot(session: Session, stock: Stock | None = None) -> None:
     now = datetime.now(TAIPEI_TZ)
-    source = "wantgoo-snapshot"
+    source = "demo-snapshot"
     if stock is None:
         stock = Stock(
             symbol="2330",
@@ -483,6 +610,20 @@ def remove_unsupported_eps(session: Session, stock_id: int | None = None) -> Non
 
     session.execute(eps_statement)
     session.execute(valuation_statement)
+
+
+def remove_legacy_histock_eps(session: Session) -> None:
+    stock_ids = session.scalars(
+        select(StockEPS.stock_id)
+        .where(func.lower(StockEPS.source).contains("histock"))
+        .distinct()
+    ).all()
+    if not stock_ids:
+        return
+
+    session.execute(delete(StockEPS).where(StockEPS.stock_id.in_(stock_ids)))
+    session.execute(delete(StockValuation).where(StockValuation.stock_id.in_(stock_ids)))
+    session.commit()
 
 
 def apply_stock_snapshot(session: Session, snapshot) -> Stock:
@@ -628,6 +769,10 @@ def apply_layered_stock_refresh(
             current_price=quote.current_price,
             change_percent=quote.change_percent,
             current_pe=metric_pe,
+            pe_average_3y=latest_metric.pe_average_3y if latest_metric else None,
+            pe_min_3y=latest_metric.pe_min_3y if latest_metric else None,
+            pe_max_3y=latest_metric.pe_max_3y if latest_metric else None,
+            pe_vs_average_percent=_pe_vs_average_percent(metric_pe, latest_metric.pe_average_3y if latest_metric else None),
             price_updated_at=quote.price_updated_at,
             pe_updated_at=metric_pe_updated_at,
             source=source,
@@ -770,6 +915,127 @@ def apply_daily_price_snapshots(session: Session, stock: Stock, snapshots: list)
         row.source = snapshot.source
         row.fetched_at = snapshot.fetched_at
         row.updated_at = now
+
+
+def apply_pe_history_snapshots(session: Session, stock: Stock, snapshots: list) -> None:
+    if not snapshots:
+        return
+
+    existing_rows = {
+        row.trade_date: row
+        for row in session.scalars(
+            select(StockPEHistory).where(
+                StockPEHistory.stock_id == stock.id,
+                StockPEHistory.trade_date >= snapshots[0].trade_date,
+            )
+        ).all()
+    }
+    now = datetime.now(UTC)
+    for snapshot in snapshots:
+        row = existing_rows.get(snapshot.trade_date)
+        if not row:
+            row = StockPEHistory(stock_id=stock.id, trade_date=snapshot.trade_date)
+            session.add(row)
+        row.per = snapshot.per
+        row.pbr = snapshot.pbr
+        row.dividend_yield = snapshot.dividend_yield
+        row.source = snapshot.source
+        row.fetched_at = snapshot.fetched_at
+        row.updated_at = now
+
+    _update_latest_metric_pe_summary(session, stock)
+
+
+def apply_monthly_revenue_snapshots(session: Session, stock: Stock, snapshots: list) -> None:
+    if not snapshots:
+        return
+
+    existing_rows = {
+        row.month_date: row
+        for row in session.scalars(
+            select(StockMonthlyRevenue).where(
+                StockMonthlyRevenue.stock_id == stock.id,
+                StockMonthlyRevenue.month_date >= snapshots[0].month_date,
+            )
+        ).all()
+    }
+    now = datetime.now(UTC)
+    for snapshot in snapshots:
+        row = existing_rows.get(snapshot.month_date)
+        if not row:
+            row = StockMonthlyRevenue(stock_id=stock.id, month_date=snapshot.month_date)
+            session.add(row)
+        row.revenue = snapshot.revenue
+        row.mom_percent = snapshot.mom_percent
+        row.yoy_percent = snapshot.yoy_percent
+        row.source = snapshot.source
+        row.fetched_at = snapshot.fetched_at
+        row.updated_at = now
+
+
+def apply_financial_quarter_snapshots(session: Session, stock: Stock, snapshots: list) -> None:
+    if not snapshots:
+        return
+
+    existing_rows = {
+        row.quarter_date: row
+        for row in session.scalars(
+            select(StockFinancialQuarter).where(
+                StockFinancialQuarter.stock_id == stock.id,
+                StockFinancialQuarter.quarter_date >= snapshots[0].quarter_date,
+            )
+        ).all()
+    }
+    now = datetime.now(UTC)
+    for snapshot in snapshots:
+        row = existing_rows.get(snapshot.quarter_date)
+        if not row:
+            row = StockFinancialQuarter(stock_id=stock.id, quarter_date=snapshot.quarter_date)
+            session.add(row)
+        row.eps = snapshot.eps
+        row.revenue = snapshot.revenue
+        row.gross_profit = snapshot.gross_profit
+        row.operating_income = snapshot.operating_income
+        row.net_income = snapshot.net_income
+        row.source = snapshot.source
+        row.fetched_at = snapshot.fetched_at
+        row.updated_at = now
+
+
+def _update_latest_metric_pe_summary(session: Session, stock: Stock) -> None:
+    latest_metric = session.scalar(
+        select(StockMetric)
+        .where(StockMetric.stock_id == stock.id)
+        .order_by(StockMetric.created_at.desc())
+        .limit(1)
+    )
+    if not latest_metric:
+        return
+
+    pe_values = [
+        value
+        for value in session.scalars(
+            select(StockPEHistory.per)
+            .where(StockPEHistory.stock_id == stock.id, StockPEHistory.per.is_not(None))
+            .order_by(StockPEHistory.trade_date.desc())
+            .limit(365 * 3)
+        ).all()
+        if value is not None and value > 0
+    ]
+    if not pe_values:
+        return
+
+    pe_average = (sum(pe_values, Decimal("0.00")) / Decimal(len(pe_values))).quantize(Decimal("0.01"))
+    latest_metric.pe_average_3y = pe_average
+    latest_metric.pe_min_3y = min(pe_values)
+    latest_metric.pe_max_3y = max(pe_values)
+    latest_metric.pe_vs_average_percent = _pe_vs_average_percent(latest_metric.current_pe, pe_average)
+
+
+def _pe_vs_average_percent(current_pe: Decimal | None, average_pe: Decimal | None) -> Decimal | None:
+    if current_pe is None or average_pe is None or average_pe == 0:
+        return None
+    return ((current_pe - average_pe) / average_pe * Decimal("100")).quantize(Decimal("0.01"))
 
 
 def next_display_order(session: Session) -> int:

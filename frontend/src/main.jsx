@@ -90,6 +90,13 @@ function formatOptionalSignedPercent(value, digits = 2) {
   return `${formatSignedNumber(value, digits)}%`;
 }
 
+function formatPeRange(minValue, maxValue) {
+  if (minValue === null || minValue === undefined || maxValue === null || maxValue === undefined) {
+    return "待更新";
+  }
+  return `${formatNumber(minValue)}～${formatNumber(maxValue)}`;
+}
+
 function formatSignedNumber(value, digits = 2) {
   return new Intl.NumberFormat("zh-TW", {
     minimumFractionDigits: digits,
@@ -880,6 +887,7 @@ const StockCard = React.forwardRef(function StockCard(
   const pendingRefresh = isPendingRefresh(refreshState);
   const statusLabel = REFRESH_STATUS_LABELS[refreshState?.status] || refreshState?.status;
   const isEtf = stock.asset_type === "ETF";
+  const [fundamentalExpanded, setFundamentalExpanded] = useState(false);
   const [brokerTradingExpanded, setBrokerTradingExpanded] = useState(false);
   const [technicalExpanded, setTechnicalExpanded] = useState(false);
 
@@ -984,9 +992,24 @@ const StockCard = React.forwardRef(function StockCard(
         </div>
         {!isEtf && (
           <div className="metric-tile pe-tile">
-            <div className="quote-current-row pe-current-row">
-              <span className="metric-label">本益比</span>
+            <div className="quote-current-row">
+              <span className="metric-label">目前PE</span>
               <strong>{formatOptionalNumber(metric?.current_pe)}</strong>
+            </div>
+            <div className="quote-comparison-grid pe-history-grid">
+              <div className="quote-comparison-item">
+                <span className="metric-label">平均</span>
+                <div className="quote-comparison-value">
+                  <strong>{formatOptionalNumber(metric?.pe_average_3y)}</strong>
+                  <span className={comparisonToneClass(metric?.pe_vs_average_percent)}>
+                    {formatOptionalSignedPercent(metric?.pe_vs_average_percent)}
+                  </span>
+                </div>
+              </div>
+              <div className="quote-comparison-item">
+                <span className="metric-label">區間</span>
+                <strong>{formatPeRange(metric?.pe_min_3y, metric?.pe_max_3y)}</strong>
+              </div>
             </div>
           </div>
         )}
@@ -1049,6 +1072,13 @@ const StockCard = React.forwardRef(function StockCard(
       )}
 
       <div className="stock-disclosures">
+        {!isEtf && (
+          <FundamentalDisclosure
+            fundamental={stock.fundamental}
+            expanded={fundamentalExpanded}
+            onToggle={() => setFundamentalExpanded((current) => !current)}
+          />
+        )}
         <BrokerTradingDisclosure
           brokerTrading={stock.broker_trading}
           expanded={brokerTradingExpanded}
@@ -1307,6 +1337,87 @@ function TechnicalSummaryValue({ label, value, accent = false }) {
     <div>
       <span>{label}</span>
       <strong className={accent ? "technical-accent-value" : ""}>{formatOptionalNumber(value)}</strong>
+    </div>
+  );
+}
+
+function FundamentalDisclosure({ fundamental, expanded, onToggle }) {
+  return (
+    <div className="fundamental-disclosure">
+      <button className="fundamental-toggle" type="button" onClick={onToggle} aria-expanded={expanded}>
+        <span>
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          基本面
+        </span>
+        <small>{fundamental?.fetched_at ? formatDate(fundamental.fetched_at) : "待更新"}</small>
+      </button>
+      {expanded && (
+        <div className="fundamental-panel">
+          <div className="fundamental-table">
+            <FundamentalRow
+              title="EPS"
+              cells={[
+                ["最新單季EPS", formatOptionalNumber(fundamental?.latest_quarter_eps)],
+                ["單季EPS YoY", formatOptionalSignedPercent(fundamental?.eps_yoy_percent), percentageToneClass(fundamental?.eps_yoy_percent)],
+                ["TTM EPS YoY", formatOptionalSignedPercent(fundamental?.ttm_eps_yoy_percent), percentageToneClass(fundamental?.ttm_eps_yoy_percent)],
+              ]}
+            />
+            <FundamentalRow
+              title="月營收"
+              cells={[
+                ["最新月營收YoY", formatOptionalSignedPercent(fundamental?.latest_revenue_yoy_percent), percentageToneClass(fundamental?.latest_revenue_yoy_percent)],
+                ["最新月營收MoM", formatOptionalSignedPercent(fundamental?.latest_revenue_mom_percent), percentageToneClass(fundamental?.latest_revenue_mom_percent)],
+                ["近三月營收YoY", formatOptionalSignedPercent(fundamental?.three_month_revenue_yoy_percent), percentageToneClass(fundamental?.three_month_revenue_yoy_percent)],
+              ]}
+            />
+            <FundamentalRow
+              title="毛利率"
+              cells={[
+                ["毛利率", formatOptionalSignedPercent(fundamental?.gross_margin), percentageToneClass(fundamental?.gross_margin)],
+                ["毛利率SoS", formatOptionalSignedPercent(fundamental?.gross_margin_sos), percentageToneClass(fundamental?.gross_margin_sos)],
+              ]}
+            />
+            <FundamentalRow
+              title="營益率"
+              cells={[
+                ["營益率", formatOptionalSignedPercent(fundamental?.operating_margin), percentageToneClass(fundamental?.operating_margin)],
+                ["營益率SoS", formatOptionalSignedPercent(fundamental?.operating_margin_sos), percentageToneClass(fundamental?.operating_margin_sos)],
+              ]}
+            />
+            <FundamentalRow
+              title="淨利率"
+              cells={[
+                ["淨利率", formatOptionalSignedPercent(fundamental?.net_margin), percentageToneClass(fundamental?.net_margin)],
+                ["淨利率SoS", formatOptionalSignedPercent(fundamental?.net_margin_sos), percentageToneClass(fundamental?.net_margin_sos)],
+              ]}
+            />
+          </div>
+          <small className="fundamental-source">{fundamental?.source || "FinMind fundamental cache"}</small>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FundamentalRow({ title, cells }) {
+  return (
+    <div className="fundamental-group">
+      <div className={`fundamental-row fundamental-row-${cells.length} fundamental-row-head`}>
+        <span></span>
+        {cells.map(([label]) => (
+          <span key={`${title}-${label}`}>{label}</span>
+        ))}
+      </div>
+      <div className={`fundamental-row fundamental-row-${cells.length}`}>
+        <span>
+          <strong>{title}</strong>
+        </span>
+        {cells.map(([label, value, tone = "constant-value"]) => (
+          <span key={`${title}-${label}`} className={tone}>
+            <strong>{value}</strong>
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

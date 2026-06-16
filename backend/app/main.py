@@ -20,7 +20,10 @@ from .database import (
     StockBrokerTradingRow,
     StockDailyPrice,
     StockEPS,
+    StockFinancialQuarter,
     StockMetric,
+    StockMonthlyRevenue,
+    StockPEHistory,
     StockPosition,
     StockRefreshState,
     StockValuation,
@@ -34,6 +37,7 @@ from .schemas import (
     BrokerOptionResponse,
     BrokerSettingRequest,
     BrokerSettingResponse,
+    FundamentalResponse,
     HealthResponse,
     MetadataResponse,
     BrokerTradingResponse,
@@ -52,13 +56,12 @@ from .schemas import (
 )
 from .refresh_worker import BackgroundRefreshManager
 from .valuation import quantize_money, valuation_status
-from .wantgoo import normalize_symbol
+from .market_data import normalize_symbol
 
 
 settings = get_settings()
 refresh_manager = BackgroundRefreshManager(
     interval_seconds=settings.background_refresh_seconds,
-    wantgoo_base_url=settings.wantgoo_base_url,
     finmind_token=settings.finmind_token,
 )
 
@@ -286,6 +289,92 @@ def _broker_trading_row_response(row: StockBrokerTradingRow) -> BrokerTradingRow
     )
 
 
+def _optional_percent(numerator: Decimal | None, denominator: Decimal | None) -> Decimal | None:
+    if numerator is None or denominator is None or denominator == 0:
+        return None
+    return quantize_money(numerator / denominator * Decimal("100"))
+
+
+def _margin(value: Decimal | None, revenue: Decimal | None) -> Decimal | None:
+    return _optional_percent(value, revenue)
+
+
+def _fundamental_response(stock: Stock, session: Session) -> FundamentalResponse | None:
+    if stock.asset_type == "ETF":
+        return None
+
+    quarters = list(reversed(session.scalars(
+        select(StockFinancialQuarter)
+        .where(StockFinancialQuarter.stock_id == stock.id)
+        .order_by(StockFinancialQuarter.quarter_date.desc())
+        .limit(8)
+    ).all()))
+    revenues = list(reversed(session.scalars(
+        select(StockMonthlyRevenue)
+        .where(StockMonthlyRevenue.stock_id == stock.id)
+        .order_by(StockMonthlyRevenue.month_date.desc())
+        .limit(3)
+    ).all()))
+
+    latest_quarter = quarters[-1] if quarters else None
+    previous_quarter = quarters[-2] if len(quarters) >= 2 else None
+    eps_yoy = _optional_percent(latest_quarter.eps - quarters[-5].eps, quarters[-5].eps) if len(quarters) >= 5 else None
+    ttm_eps_yoy = None
+    if len(quarters) >= 8:
+        latest_ttm = sum((row.eps for row in quarters[-4:]), Decimal("0"))
+        previous_ttm = sum((row.eps for row in quarters[-8:-4]), Decimal("0"))
+        ttm_eps_yoy = _optional_percent(latest_ttm - previous_ttm, previous_ttm)
+
+    latest_revenue = revenues[-1] if revenues else None
+    revenue_yoy_values = [row.yoy_percent for row in revenues if row.yoy_percent is not None]
+    three_month_yoy = (
+        sum(revenue_yoy_values, Decimal("0")) / Decimal(len(revenue_yoy_values))
+        if revenue_yoy_values
+        else None
+    )
+
+    gross_margin = _margin(latest_quarter.gross_profit, latest_quarter.revenue) if latest_quarter else None
+    previous_gross_margin = _margin(previous_quarter.gross_profit, previous_quarter.revenue) if previous_quarter else None
+    operating_margin = _margin(latest_quarter.operating_income, latest_quarter.revenue) if latest_quarter else None
+    previous_operating_margin = _margin(previous_quarter.operating_income, previous_quarter.revenue) if previous_quarter else None
+    net_margin = _margin(latest_quarter.net_income, latest_quarter.revenue) if latest_quarter else None
+    previous_net_margin = _margin(previous_quarter.net_income, previous_quarter.revenue) if previous_quarter else None
+
+    fetched_values = [
+        value
+        for value in [
+            latest_quarter.fetched_at if latest_quarter else None,
+            latest_revenue.fetched_at if latest_revenue else None,
+        ]
+        if value is not None
+    ]
+    source_values = [
+        value
+        for value in [
+            latest_quarter.source if latest_quarter else None,
+            latest_revenue.source if latest_revenue else None,
+        ]
+        if value
+    ]
+
+    return FundamentalResponse(
+        latest_quarter_eps=_optional_float(latest_quarter.eps if latest_quarter else None),
+        eps_yoy_percent=_optional_float(eps_yoy),
+        ttm_eps_yoy_percent=_optional_float(ttm_eps_yoy),
+        latest_revenue_yoy_percent=_optional_float(latest_revenue.yoy_percent if latest_revenue else None),
+        latest_revenue_mom_percent=_optional_float(latest_revenue.mom_percent if latest_revenue else None),
+        three_month_revenue_yoy_percent=_optional_float(three_month_yoy),
+        gross_margin=_optional_float(gross_margin),
+        gross_margin_sos=_optional_float(gross_margin - previous_gross_margin if gross_margin is not None and previous_gross_margin is not None else None),
+        operating_margin=_optional_float(operating_margin),
+        operating_margin_sos=_optional_float(operating_margin - previous_operating_margin if operating_margin is not None and previous_operating_margin is not None else None),
+        net_margin=_optional_float(net_margin),
+        net_margin_sos=_optional_float(net_margin - previous_net_margin if net_margin is not None and previous_net_margin is not None else None),
+        source=" + ".join(dict.fromkeys(source_values)) if source_values else None,
+        fetched_at=max(fetched_values) if fetched_values else None,
+    )
+
+
 def _stock_response(stock: Stock, session: Session) -> StockResponse:
     metric = _latest_metric(session, stock.id)
     position = session.scalar(select(StockPosition).where(StockPosition.stock_id == stock.id))
@@ -314,6 +403,10 @@ def _stock_response(stock: Stock, session: Session) -> StockResponse:
             current_price=_float(metric.current_price),
             change_percent=_optional_float(metric.change_percent),
             current_pe=_float(metric.current_pe),
+            pe_average_3y=_optional_float(metric.pe_average_3y),
+            pe_min_3y=_optional_float(metric.pe_min_3y),
+            pe_max_3y=_optional_float(metric.pe_max_3y),
+            pe_vs_average_percent=_optional_float(metric.pe_vs_average_percent),
             price_updated_at=metric.price_updated_at,
             pe_updated_at=metric.pe_updated_at,
             source=metric.source,
@@ -322,6 +415,7 @@ def _stock_response(stock: Stock, session: Session) -> StockResponse:
         else None,
         position=_position_response(position, metric, broker, stock.asset_type),
         broker_trading=_broker_trading_response(stock, session),
+        fundamental=_fundamental_response(stock, session),
         valuations=[_valuation_response(valuation, position.buy_price if position else None) for valuation in valuations],
     )
 
@@ -368,7 +462,7 @@ def _technical_analysis_response(stock: Stock, session: Session, limit: int) -> 
                 "low": metric.day_low or min(open_price, current_price),
                 "close": current_price,
                 "volume": None,
-                "source": "WantGoo provisional quote",
+                "source": f"{metric.source} provisional quote",
                 "fetched_at": metric.price_updated_at,
                 "is_provisional": True,
             }
@@ -434,7 +528,7 @@ def health() -> HealthResponse:
 async def metadata(session: Session = Depends(get_session)) -> MetadataResponse:
     refresh_status = await refresh_manager.snapshot()
     return MetadataResponse(
-        data_source="WantGoo quote + TWSE OpenAPI PE + HiStock EPS + Yahoo broker trading + FinMind daily prices",
+        data_source="TWSE/FinMind quote + TWSE OpenAPI PE + FinMind EPS/fundamentals/daily prices + Yahoo broker trading",
         api_version=settings.api_version,
         stocks_count=len(_active_stocks(session)),
         valuations_count=_active_valuations_count(session),
@@ -565,6 +659,9 @@ async def delete_stock(symbol: str, session: Session = Depends(get_session)) -> 
     session.execute(delete(StockEPS).where(StockEPS.stock_id == stock.id))
     session.execute(delete(StockValuation).where(StockValuation.stock_id == stock.id))
     session.execute(delete(StockDailyPrice).where(StockDailyPrice.stock_id == stock.id))
+    session.execute(delete(StockPEHistory).where(StockPEHistory.stock_id == stock.id))
+    session.execute(delete(StockMonthlyRevenue).where(StockMonthlyRevenue.stock_id == stock.id))
+    session.execute(delete(StockFinancialQuarter).where(StockFinancialQuarter.stock_id == stock.id))
     session.execute(delete(StockRefreshState).where(StockRefreshState.symbol == normalized_symbol))
     session.execute(delete(CrawlerLog).where(CrawlerLog.job_name == f"market_refresh:{normalized_symbol}"))
     session.delete(stock)

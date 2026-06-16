@@ -14,19 +14,28 @@ from .database import (
     StockBrokerTrading,
     StockDailyPrice,
     StockEPS,
+    StockFinancialQuarter,
     StockMetric,
+    StockMonthlyRevenue,
+    StockPEHistory,
     StockRefreshState,
     apply_broker_trading_snapshot,
     apply_daily_price_snapshots,
+    apply_financial_quarter_snapshots,
     apply_layered_stock_refresh,
+    apply_monthly_revenue_snapshots,
+    apply_pe_history_snapshots,
     cleanup_crawler_logs_if_due,
     log_crawler_result,
     next_display_order,
 )
 from .finmind_daily import fetch_daily_prices
-from .histock_eps import fetch_stock_eps
-from .wantgoo import (
+from .market_data import (
     derive_pe,
+    fetch_financial_quarters,
+    fetch_monthly_revenues,
+    fetch_pe_history,
+    fetch_stock_eps,
     fetch_stock_pe,
     fetch_stock_profile,
     fetch_stock_quote,
@@ -61,9 +70,8 @@ class RefreshJob:
 
 
 class BackgroundRefreshManager:
-    def __init__(self, interval_seconds: int, wantgoo_base_url: str, finmind_token: str | None = None) -> None:
+    def __init__(self, interval_seconds: int, finmind_token: str | None = None) -> None:
         self.interval_seconds = interval_seconds
-        self.wantgoo_base_url = wantgoo_base_url
         self.finmind_token = finmind_token
         self._queue: asyncio.Queue[RefreshJob] | None = None
         self._queued_symbols: set[str] = set()
@@ -298,7 +306,6 @@ class BackgroundRefreshManager:
             message = await asyncio.to_thread(
                 _refresh_symbol_sync,
                 symbol,
-                self.wantgoo_base_url,
                 started_at,
                 force_full=force_full,
                 finmind_token=self.finmind_token,
@@ -673,6 +680,22 @@ def _daily_prices_due(symbol: str, now: datetime) -> bool:
         return latest_fetched_at is None or not _is_same_day(latest_fetched_at, now)
 
 
+def _analysis_table_due(symbol: str, now: datetime, model, fetched_at_column) -> bool:
+    with SessionLocal() as session:
+        stock = session.scalar(select(Stock).where(Stock.symbol == symbol))
+        if not stock:
+            return False
+
+        latest_fetched_at = session.scalar(
+            select(fetched_at_column)
+            .select_from(model)
+            .where(model.stock_id == stock.id)
+            .order_by(fetched_at_column.desc())
+            .limit(1)
+        )
+        return latest_fetched_at is None or not _is_same_day(latest_fetched_at, now)
+
+
 def _ensure_active_placeholder(symbol: str) -> None:
     now = datetime.now(UTC)
     with SessionLocal() as session:
@@ -710,7 +733,6 @@ def _cached_profile_snapshot(symbol: str) -> StockProfileSnapshot | None:
 
 def _refresh_symbol_sync(
     symbol: str,
-    wantgoo_base_url: str,
     started_at: datetime,
     *,
     force_full: bool = False,
@@ -722,12 +744,30 @@ def _refresh_symbol_sync(
     pe_due, eps_due = (True, True) if force_full else _refresh_due(symbol, started_at)
     broker_trading_due = True if force_full else _broker_trading_due(symbol, started_at)
     daily_prices_due = True if force_full else _daily_prices_due(symbol, started_at)
+    pe_history_due = True if force_full else _analysis_table_due(
+        symbol,
+        started_at,
+        StockPEHistory,
+        StockPEHistory.fetched_at,
+    )
+    monthly_revenue_due = True if force_full else _analysis_table_due(
+        symbol,
+        started_at,
+        StockMonthlyRevenue,
+        StockMonthlyRevenue.fetched_at,
+    )
+    financial_quarters_due = True if force_full else _analysis_table_due(
+        symbol,
+        started_at,
+        StockFinancialQuarter,
+        StockFinancialQuarter.fetched_at,
+    )
     calculated_at = datetime.now(UTC)
     messages = ["全量刷新：股價已更新" if force_full else "股價已更新"]
-    source_parts = ["WantGoo quote"]
+    source_parts: list[str] = []
 
     try:
-        profile = fetch_stock_profile(symbol, wantgoo_base_url)
+        profile = fetch_stock_profile(symbol, finmind_token=finmind_token)
     except Exception as exc:
         profile = _cached_profile_snapshot(symbol)
         if not profile:
@@ -735,19 +775,27 @@ def _refresh_symbol_sync(
         messages.append(f"profile 更新失敗，沿用快取：{exc}")
         source_parts.append("cached profile")
 
-    quote = fetch_stock_quote(symbol, wantgoo_base_url)
+    quote = fetch_stock_quote(symbol, profile=profile, finmind_token=finmind_token)
+    source_parts.append(quote.source)
     current_pe = None
     pe_updated_at = None
     eps_rows = None
     eps_updated_at = None
     broker_trading = None
     daily_prices = None
+    pe_history = None
+    monthly_revenues = None
+    financial_quarters = None
 
     if profile.asset_type == "ETF":
         messages.append("ETF 僅更新現價")
     elif pe_due:
         try:
-            current_pe = fetch_stock_pe(symbol)
+            current_pe = fetch_stock_pe(
+                symbol,
+                finmind_token=finmind_token,
+                end_date=started_at.astimezone(TAIPEI_TZ).date(),
+            )
         except Exception as exc:
             messages.append(f"PE 更新失敗，沿用快取：{exc}")
             source_parts.append("cached PE")
@@ -758,7 +806,7 @@ def _refresh_symbol_sync(
             else:
                 pe_updated_at = calculated_at
                 messages.append("PE 已按日更新")
-                source_parts.append("TWSE daily PE")
+                source_parts.append("TWSE/FinMind daily PE")
     else:
         messages.append("PE 沿用今日快取")
         source_parts.append("cached daily PE")
@@ -767,14 +815,18 @@ def _refresh_symbol_sync(
         pass
     elif eps_due:
         try:
-            eps_rows = fetch_stock_eps(symbol)
+            eps_rows = fetch_stock_eps(
+                symbol,
+                finmind_token=finmind_token,
+                end_date=started_at.astimezone(TAIPEI_TZ).date(),
+            )
         except Exception as exc:
             messages.append(f"EPS 更新失敗，沿用快取：{exc}")
             source_parts.append("cached EPS")
         else:
             eps_updated_at = calculated_at
             messages.append("EPS 已按日更新")
-            source_parts.append("HiStock daily EPS")
+            source_parts.append("FinMind financial EPS")
     else:
         messages.append("EPS 沿用今日快取")
         source_parts.append("cached daily EPS")
@@ -809,6 +861,50 @@ def _refresh_symbol_sync(
     else:
         messages.append("日線沿用今日快取")
 
+    if profile.asset_type != "ETF" and pe_history_due:
+        try:
+            pe_history = fetch_pe_history(
+                symbol,
+                finmind_token=finmind_token,
+                end_date=started_at.astimezone(TAIPEI_TZ).date(),
+            )
+        except Exception as exc:
+            messages.append(f"三年 PE 更新失敗，沿用快取：{exc}")
+        else:
+            messages.append("三年 PE 已按日更新")
+    elif profile.asset_type != "ETF":
+        messages.append("三年 PE 沿用今日快取")
+
+    if profile.asset_type != "ETF" and monthly_revenue_due:
+        try:
+            monthly_revenues = fetch_monthly_revenues(
+                symbol,
+                finmind_token=finmind_token,
+                end_date=started_at.astimezone(TAIPEI_TZ).date(),
+                months=36,
+            )
+        except Exception as exc:
+            messages.append(f"月營收更新失敗，沿用快取：{exc}")
+        else:
+            messages.append("月營收已按日更新")
+    elif profile.asset_type != "ETF":
+        messages.append("月營收沿用今日快取")
+
+    if profile.asset_type != "ETF" and financial_quarters_due:
+        try:
+            financial_quarters = fetch_financial_quarters(
+                symbol,
+                finmind_token=finmind_token,
+                end_date=started_at.astimezone(TAIPEI_TZ).date(),
+                quarters=12,
+            )
+        except Exception as exc:
+            messages.append(f"季度基本面更新失敗，沿用快取：{exc}")
+        else:
+            messages.append("季度基本面已按日更新")
+    elif profile.asset_type != "ETF":
+        messages.append("季度基本面沿用今日快取")
+
     source = " + ".join(source_parts)
     with SessionLocal() as session:
         try:
@@ -833,6 +929,12 @@ def _refresh_symbol_sync(
                 apply_broker_trading_snapshot(session, stock, broker_trading)
             if daily_prices:
                 apply_daily_price_snapshots(session, stock, daily_prices)
+            if pe_history:
+                apply_pe_history_snapshots(session, stock, pe_history)
+            if monthly_revenues:
+                apply_monthly_revenue_snapshots(session, stock, monthly_revenues)
+            if financial_quarters:
+                apply_financial_quarter_snapshots(session, stock, financial_quarters)
             log_crawler_result(
                 session=session,
                 job_name=f"market_refresh:{symbol}",

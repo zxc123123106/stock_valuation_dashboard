@@ -35,6 +35,10 @@ class StockMetricResponse(BaseModel):
     current_price: float
     change_percent: float | None = None
     current_pe: float
+    pe_average_3y: float | None = None
+    pe_min_3y: float | None = None
+    pe_max_3y: float | None = None
+    pe_vs_average_percent: float | None = None
     price_updated_at: datetime
     pe_updated_at: datetime
     source: str
@@ -121,6 +125,23 @@ class TechnicalAnalysisResponse(BaseModel):
     candles: list[TechnicalCandleResponse]
 
 
+class FundamentalResponse(BaseModel):
+    latest_quarter_eps: float | None = None
+    eps_yoy_percent: float | None = None
+    ttm_eps_yoy_percent: float | None = None
+    latest_revenue_yoy_percent: float | None = None
+    latest_revenue_mom_percent: float | None = None
+    three_month_revenue_yoy_percent: float | None = None
+    gross_margin: float | None = None
+    gross_margin_sos: float | None = None
+    operating_margin: float | None = None
+    operating_margin_sos: float | None = None
+    net_margin: float | None = None
+    net_margin_sos: float | None = None
+    source: str | None = None
+    fetched_at: datetime | None = None
+
+
 class StockResponse(BaseModel):
     symbol: str
     name: str
@@ -132,6 +153,7 @@ class StockResponse(BaseModel):
     metric: StockMetricResponse | None
     position: StockPositionResponse | None = None
     broker_trading: BrokerTradingResponse | None = None
+    fundamental: FundamentalResponse | None = None
     valuations: list[StockValuationResponse]
 
 

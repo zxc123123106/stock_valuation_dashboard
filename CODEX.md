@@ -83,21 +83,22 @@ text 股票代號 股票名稱 即時股價 目前本益比 近四季 EPS / TTM 
 
 本機版採用多來源整合，避免只解析單一網頁初始 HTML 而造成資料落後。
 
-以台積電為例：
-
-text https://www.wantgoo.com/stock/2330/financial-statements/eps 
-
 系統需要從資料來源取得：
 
-text 即時股價 目前本益比 近四季 EPS / TTM EPS 去年全年 EPS 
+text 即時股價 目前 PE 近三年 PE 歷史 近四季 EPS / TTM EPS 去年全年 EPS 基本面資料
 
 目前實作來源：
 
 | 資料 | 來源 |
 |---|---|
-| 即時股價、股票名稱 | WantGoo quote JSON |
-| 目前本益比 | TWSE OpenAPI BWIBBU_ALL |
-| 季度 EPS、TTM EPS、去年全年 EPS | FinMind TaiwanStockFinancialStatements |
+| 股票名稱、ETF 類型、市場別 | FinMind TaiwanStockInfo |
+| 盤中現價、開盤、昨收、最高、最低 | FinMind sponsor 即時快照、TWSE MIS、FinMind TaiwanStockPrice 最近收盤 fallback |
+| 目前 PE | TWSE OpenAPI BWIBBU_ALL，缺值時 fallback 到 FinMind TaiwanStockPER |
+| 近三年 PE 平均與區間 | FinMind TaiwanStockPER |
+| 季度 EPS、TTM EPS、去年全年 EPS、利潤率 | FinMind TaiwanStockFinancialStatements |
+| 月營收 YoY / MoM | FinMind TaiwanStockMonthRevenue |
+| 日線 OHLC | FinMind TaiwanStockPrice |
+| 主力券商排行 | Yahoo broker trading，屬使用者指定第三方來源 |
 
 ---
 

@@ -579,8 +579,13 @@ h1 {
   align-content: start;
 }
 
-.pe-current-row {
+.pe-history-grid .quote-comparison-item {
   border-bottom: 0;
+}
+
+.pe-history-grid .quote-comparison-item > strong {
+  color: var(--gold-strong);
+  font-size: 0.98rem;
 }
 
 .quote-comparison-grid {
@@ -694,10 +699,12 @@ h1 {
   border-top: 1px solid var(--line-soft);
 }
 
+.fundamental-disclosure,
 .broker-trading {
   border-bottom: 1px solid var(--line-soft);
 }
 
+.fundamental-toggle,
 .broker-toggle {
   display: flex;
   align-items: center;
@@ -713,6 +720,7 @@ h1 {
   cursor: pointer;
 }
 
+.fundamental-toggle span,
 .broker-toggle span {
   display: inline-flex;
   align-items: center;
@@ -721,12 +729,82 @@ h1 {
   font-weight: 750;
 }
 
+.fundamental-toggle small,
 .broker-toggle small {
   margin: 0;
 }
 
+.fundamental-panel,
 .broker-panel {
   padding: 2px 0 16px;
+}
+
+.fundamental-table {
+  display: grid;
+  overflow-x: auto;
+  gap: 0;
+}
+
+.fundamental-row {
+  display: grid;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.fundamental-row-3,
+.fundamental-row-2 {
+  grid-template-columns: minmax(88px, 112px) repeat(3, minmax(118px, 1fr));
+  min-width: 500px;
+}
+
+.fundamental-row-head {
+  padding-bottom: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.fundamental-row-head + .fundamental-row {
+  padding-top: 6px;
+}
+
+.fundamental-row span:not(:first-child) {
+  text-align: right;
+}
+
+.fundamental-row strong {
+  display: block;
+}
+
+.fundamental-row > span:first-child strong {
+  color: var(--text);
+  font-size: 1.08rem;
+  font-weight: 800;
+}
+
+.fundamental-row .constant-value {
+  color: var(--gold-strong);
+  font-weight: 650;
+}
+
+.fundamental-row .percentage-positive {
+  color: var(--danger);
+}
+
+.fundamental-row .percentage-negative {
+  color: var(--success);
+}
+
+.fundamental-row .percentage-zero {
+  color: var(--muted);
+}
+
+.fundamental-source {
+  display: block;
+  margin-top: 10px;
+  text-align: right;
 }
 
 .technical-analysis {

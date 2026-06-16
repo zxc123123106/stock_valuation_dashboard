@@ -38,7 +38,6 @@ class Settings:
     app_env: str
     database_url: str
     cors_origins: list[str]
-    wantgoo_base_url: str
     finmind_token: str | None
     background_refresh_seconds: int
     crawler_log_retention_days: int
@@ -69,7 +68,6 @@ def get_settings() -> Settings:
                 "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174",
             )
         ),
-        wantgoo_base_url=os.getenv("WANTGOO_BASE_URL", "https://www.wantgoo.com"),
         finmind_token=os.getenv("FINMIND_TOKEN") or None,
         background_refresh_seconds=_parse_positive_int(
             os.getenv("BACKGROUND_REFRESH_SECONDS", "60"),

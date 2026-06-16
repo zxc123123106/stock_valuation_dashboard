@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 import requests
 from bs4 import BeautifulSoup
 
-from .wantgoo import normalize_symbol
+from .market_data import normalize_symbol
 
 
 YAHOO_STOCK_BASE_URL = "https://tw.stock.yahoo.com"

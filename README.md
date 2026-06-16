@@ -11,7 +11,7 @@
 
 - Python 3.13 或相容的 Python 3.x
 - Node.js 24 LTS 或更新版本
-- 可連線到 WantGoo、TWSE、HiStock、Yahoo 主力進出與 FinMind 日線資料來源
+- 可連線到 TWSE、FinMind，以及使用者指定的 Yahoo 主力進出資料來源
 
 ## 安裝
 
@@ -155,11 +155,13 @@ curl http://127.0.0.1:8000/api/stocks
 
 後端自動更新只在台北時間平日 `09:00` 到 `14:00` 執行。
 
-- 股票與 ETF 股價每 `BACKGROUND_REFRESH_SECONDS` 更新一次，預設為 `60` 秒。
+- 股票與 ETF 股價每 `BACKGROUND_REFRESH_SECONDS` 更新一次，預設為 `60` 秒；資料來源依序為 FinMind sponsor 即時快照、TWSE MIS、FinMind `TaiwanStockPrice` 最近收盤。
 - 主力進出每日更新一次，股票與 ETF 都會抓取。
-- 日線使用 FinMind `TaiwanStockPrice` 每日更新一次，股票與 ETF 都會保存最近約 240 個日曆日的歷史資料；盤中另以 WantGoo 行情補上當日暫定 K 棒。
-- 本益比使用 TWSE OpenAPI，EPS 使用 HiStock，並在台北時間每日 `09:00` 後第一輪自動更新一次，只適用股票。
-- ETF 顯示股價、買入價、每股未實現損益與主力進出；不顯示本益比、EPS 或估值列。
+- 日線使用 FinMind `TaiwanStockPrice` 每日更新一次，股票與 ETF 都會保存最近約 240 個日曆日的歷史資料；盤中另以現價快取補上當日暫定 K 棒。
+- 目前PE優先使用 TWSE OpenAPI；TWSE 無資料時 fallback 到 FinMind `TaiwanStockPER` 最新 PER。
+- 近三年平均PE與PE區間使用 FinMind `TaiwanStockPER`。
+- EPS 與季度基本面使用 FinMind `TaiwanStockFinancialStatements`，月營收使用 FinMind `TaiwanStockMonthRevenue`，並在台北時間每日 `09:00` 後第一輪自動更新一次，只適用股票。
+- ETF 顯示股價、買入價、每股未實現損益與主力進出；不顯示目前PE、EPS、基本面或估值列。
 - `14:00` 後，後端會在每個平日做一次收盤補抓，確認最後一筆快取。
 - 週末不會自動更新。
 - 手動更新任何時間都可以使用。
@@ -176,6 +178,8 @@ curl http://127.0.0.1:8000/api/stocks
 - 每檔標的可以輸入買入價，用來顯示每股未實現損益。
 - Toolbar 可選擇費率券商；目前支援國泰證券，設定會保存於 SQLite。
 - 行情區顯示現價、開盤、昨收、當日最高與當日最低，並計算各指標相對現價的差距百分比。
+- 股票卡片顯示目前PE、近三年平均PE與近三年PE區間。
+- 股票卡片的「基本面」預設收合，展開後顯示 EPS、月營收、毛利率、營益率與淨利率。
 - 每張卡片的「技術分析」預設收合，展開後顯示最近 120 個交易日的日 K、MA20、十字線與游標日期／OHLC／MA20 摘要。
 - 按 `賣出` 會清除該檔標的目前買入價。
 - 可以拖曳卡片左側排序把手調整順序，也可以用卡片右上角的上移/下移箭頭微調。
