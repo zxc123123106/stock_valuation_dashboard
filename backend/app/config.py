@@ -39,6 +39,11 @@ class Settings:
     database_url: str
     cors_origins: list[str]
     finmind_token: str | None
+    ai_provider: str
+    gemini_api_key: str | None
+    gemini_model: str
+    openrouter_api_key: str | None
+    openrouter_model: str
     background_refresh_seconds: int
     crawler_log_retention_days: int
     crawler_log_cleanup_interval_hours: int
@@ -69,6 +74,11 @@ def get_settings() -> Settings:
             )
         ),
         finmind_token=os.getenv("FINMIND_TOKEN") or None,
+        ai_provider=os.getenv("AI_PROVIDER", "gemini").strip().lower(),
+        gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+        openrouter_api_key=os.getenv("OPENROUTER_API_KEY") or None,
+        openrouter_model=os.getenv("OPENROUTER_MODEL", ""),
         background_refresh_seconds=_parse_positive_int(
             os.getenv("BACKGROUND_REFRESH_SECONDS", "60"),
             60,

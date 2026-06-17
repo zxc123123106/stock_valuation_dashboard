@@ -51,6 +51,24 @@ copy frontend\.env.example frontend\.env
 
 `FINMIND_TOKEN` 為可選設定；未填寫時使用 FinMind 匿名額度，若日線更新頻繁或遇到額度限制，可在根目錄 `.env` 填入 token。
 
+AI 分析使用後端環境變數，不會把 API key 放到前端。第一版建議使用 Gemini：
+
+```env
+AI_PROVIDER=gemini
+GEMINI_API_KEY=你的 Google AI Studio API key
+GEMINI_MODEL=gemini-3.5-flash
+```
+
+如果要改用 OpenRouter：
+
+```env
+AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=你的 OpenRouter API key
+OPENROUTER_MODEL=你選擇的模型名稱
+```
+
+修改 `.env` 後需要重啟後端才會生效。不要把 `.env` 提交到版本控制。
+
 安裝前端依賴。
 
 macOS / bash 與 Windows cmd:
@@ -180,7 +198,8 @@ curl http://127.0.0.1:8000/api/stocks
 - 行情區顯示現價、開盤、昨收、當日最高與當日最低，並計算各指標相對現價的差距百分比。
 - 股票卡片顯示目前PE、近三年平均PE與近三年PE區間。
 - 股票卡片的「基本面」預設收合，展開後顯示 EPS、月營收、毛利率、營益率與淨利率。
-- 每張卡片的「技術分析」預設收合，展開後顯示最近 120 個交易日的日 K、MA20、十字線與游標日期／OHLC／MA20 摘要。
+- 每張卡片的「技術分析」預設收合，展開後顯示最近 120 個交易日的日 K、MA5/10/20/60/120/240、成交量摘要與十字線。
+- 每張卡片的「AI 分析摘要」需要手動按 `產生 AI 分析`。後端只會傳送整理後的摘要指標，不傳完整 K 線、完整券商分點明細、持有股數或帳戶資訊。同一標的同一天、同一 provider/model、同一份資料摘要會優先使用 SQLite 快取，避免重複消耗免費 API 額度。
 - 按 `賣出` 會清除該檔標的目前買入價。
 - 可以拖曳卡片左側排序把手調整順序，也可以用卡片右上角的上移/下移箭頭微調。
 - 刪除標的是永久刪除，會移除該標的、持倉、股價快取、EPS、估值、主力進出與該標的更新紀錄。
@@ -198,6 +217,7 @@ curl http://127.0.0.1:8000/api/stocks
 - `GET /api/stocks/{symbol}`
 - `GET /api/stocks/{symbol}/technical-analysis?limit=120`
 - `GET /api/stocks/{symbol}/valuations`
+- `POST /api/stocks/{symbol}/ai-analysis`
 - `GET /api/refresh/status`
 - `GET /api/settings/broker`
 - `PUT /api/settings/broker`

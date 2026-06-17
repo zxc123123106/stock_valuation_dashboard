@@ -209,3 +209,27 @@ class StockReorderRequest(BaseModel):
 class StockDeleteResponse(BaseModel):
     status: str
     symbol: str
+
+
+class StockAIAnalysisRequest(BaseModel):
+    provider: str | None = None
+    force_refresh: bool = False
+
+
+class StockAIAnalysisContent(BaseModel):
+    overall_status: str
+    summary: str
+    positive_points: list[str]
+    risk_points: list[str]
+    watch_points: list[str]
+    disclaimer: str
+    format_valid: bool = True
+
+
+class StockAIAnalysisResponse(BaseModel):
+    provider: str
+    model: str
+    cached: bool
+    analysis_date: date
+    generated_at: datetime
+    analysis: StockAIAnalysisContent

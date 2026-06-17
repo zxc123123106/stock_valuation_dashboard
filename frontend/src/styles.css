@@ -842,6 +842,122 @@ h1 {
   padding: 0 0 16px;
 }
 
+.ai-analysis {
+  border-top: 1px solid var(--line-soft);
+}
+
+.ai-analysis-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  min-height: 50px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ai-analysis-toggle > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--gold-strong);
+  font-weight: 750;
+}
+
+.ai-analysis-toggle small {
+  margin: 0;
+}
+
+.ai-analysis-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ai-analysis-button {
+  min-height: 34px;
+  padding: 0 11px;
+  font-size: 0.82rem;
+}
+
+.ai-analysis-button svg {
+  flex: 0 0 auto;
+}
+
+.ai-analysis-error,
+.ai-analysis-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.ai-analysis-error {
+  color: var(--danger);
+}
+
+.ai-analysis-panel {
+  display: grid;
+  gap: 12px;
+  padding: 0 0 16px;
+}
+
+.ai-status-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.ai-status-row span,
+.ai-analysis-lists strong {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.ai-status-row strong {
+  color: var(--gold-strong);
+  font-size: 1rem;
+}
+
+.ai-analysis-panel p {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.65;
+}
+
+.ai-analysis-lists {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.ai-analysis-lists div {
+  min-width: 0;
+}
+
+.ai-analysis-lists ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.ai-analysis-panel small {
+  margin: 0;
+}
+
 .technical-chart-shell {
   overflow: hidden;
   border: 1px solid var(--line-soft);
@@ -1178,6 +1294,10 @@ footer a {
     width: 100%;
   }
 
+  .ai-analysis-button {
+    width: auto;
+  }
+
   .position-row .sell-button {
     width: auto;
   }
@@ -1218,6 +1338,23 @@ footer a {
   .technical-summary-volume {
     grid-template-columns: repeat(2, minmax(128px, 1fr));
     min-width: 256px;
+  }
+
+  .ai-analysis-toggle {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ai-analysis-actions {
+    justify-content: stretch;
+  }
+
+  .ai-analysis-button {
+    width: 100%;
+  }
+
+  .ai-analysis-lists {
+    grid-template-columns: 1fr;
   }
 
   .technical-chart {

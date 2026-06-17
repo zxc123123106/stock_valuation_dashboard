@@ -38,6 +38,7 @@ import {
   Plus,
   RefreshCcw,
   Search,
+  Sparkles,
   Trash2,
   Wifi,
 } from "lucide-react";
@@ -948,6 +949,7 @@ const StockCard = React.forwardRef(function StockCard(
   const [fundamentalExpanded, setFundamentalExpanded] = useState(false);
   const [brokerTradingExpanded, setBrokerTradingExpanded] = useState(false);
   const [technicalExpanded, setTechnicalExpanded] = useState(false);
+  const [aiAnalysisExpanded, setAiAnalysisExpanded] = useState(false);
 
   return (
     <article
@@ -1152,6 +1154,11 @@ const StockCard = React.forwardRef(function StockCard(
           metricUpdatedAt={metric?.price_updated_at}
           expanded={technicalExpanded}
           onToggle={() => setTechnicalExpanded((current) => !current)}
+        />
+        <AIAnalysisDisclosure
+          symbol={stock.symbol}
+          expanded={aiAnalysisExpanded}
+          onToggle={() => setAiAnalysisExpanded((current) => !current)}
         />
       </div>
     </article>
@@ -1449,6 +1456,108 @@ function TechnicalSummaryValue({ label, value, accent = false, digits = 2, suffi
     <div>
       <span>{label}</span>
       <strong className={accent ? "technical-accent-value" : ""}>{formattedValue}</strong>
+    </div>
+  );
+}
+
+function AIAnalysisDisclosure({ symbol, expanded, onToggle }) {
+  const [analysisResponse, setAnalysisResponse] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function generateAnalysis(forceRefresh = false) {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/stocks/${symbol}/ai-analysis`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ force_refresh: forceRefresh }),
+      });
+      if (!response.ok) {
+        throw new Error(await parseError(response));
+      }
+      setAnalysisResponse(await response.json());
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const analysis = analysisResponse?.analysis;
+
+  return (
+    <div className="ai-analysis">
+      <button className="ai-analysis-toggle" type="button" onClick={onToggle} aria-expanded={expanded}>
+        <span>
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          AI 分析摘要
+        </span>
+        <small>{analysisResponse ? formatDate(analysisResponse.generated_at) : "手動產生"}</small>
+      </button>
+      {expanded && (
+        <div className="ai-analysis-panel">
+          <div className="ai-analysis-actions">
+            <button
+              className="text-button ai-analysis-button"
+              type="button"
+              onClick={() => generateAnalysis(Boolean(analysisResponse))}
+              disabled={loading}
+            >
+              {loading ? <Loader2 size={15} /> : <Sparkles size={15} />}
+              {analysisResponse ? "重新產生" : "產生 AI 分析"}
+            </button>
+          </div>
+          {error && (
+            <div className="ai-analysis-error">
+              <AlertCircle size={15} />
+              {error}
+            </div>
+          )}
+          {analysis ? (
+            <>
+              <div className="ai-status-row">
+                <span>狀態</span>
+                <strong>{analysis.overall_status}</strong>
+              </div>
+              <p>{analysis.summary}</p>
+              <div className="ai-analysis-lists">
+                <AIAnalysisList title="正面因素" items={analysis.positive_points} />
+                <AIAnalysisList title="風險因素" items={analysis.risk_points} />
+                <AIAnalysisList title="後續觀察" items={analysis.watch_points} />
+              </div>
+              <small>
+                {analysisResponse.provider} · {analysisResponse.model}
+                {analysisResponse.cached ? " · 使用今日快取" : " · 新產生"}
+                {" · "}
+                {formatDate(analysisResponse.generated_at)}
+              </small>
+              <small>{analysis.disclaimer}</small>
+            </>
+          ) : (
+            <div className="ai-analysis-empty">
+              只會傳送後端整理後的摘要指標，不傳完整 K 線、完整券商明細或帳戶資訊。
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AIAnalysisList({ title, items }) {
+  const displayItems = items?.length ? items : ["暫無明確訊號"];
+  return (
+    <div>
+      <strong>{title}</strong>
+      <ul>
+        {displayItems.map((item) => (
+          <li key={`${title}-${item}`}>{item}</li>
+        ))}
+      </ul>
     </div>
   );
 }

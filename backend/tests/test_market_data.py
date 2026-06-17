@@ -216,6 +216,30 @@ class FinMindFundamentalParserTest(unittest.TestCase):
         self.assertEqual(rows[0].operating_income, Decimal("450.00"))
         self.assertEqual(rows[0].net_income, Decimal("400.00"))
 
+    def test_parse_financial_quarters_accepts_finmind_taxed_income_alias(self) -> None:
+        rows = _parse_financial_quarters(
+            "4958",
+            [
+                {"date": "2026-03-31", "type": "EPS", "value": 1.33},
+                {"date": "2026-03-31", "type": "Revenue", "value": 1000},
+                {"date": "2026-03-31", "type": "IncomeAfterTaxes", "value": 216.4},
+            ],
+        )
+
+        self.assertEqual(rows[0].net_income, Decimal("216.40"))
+
+    def test_parse_financial_quarters_accepts_tw_financial_net_income_alias(self) -> None:
+        rows = _parse_financial_quarters(
+            "4958",
+            [
+                {"date": "2026-03-31", "type": "EPS", "value": 1.33},
+                {"date": "2026-03-31", "type": "營業收入合計", "value": 1000},
+                {"date": "2026-03-31", "type": "本期稅後淨利", "value": 180},
+            ],
+        )
+
+        self.assertEqual(rows[0].net_income, Decimal("180.00"))
+
 
 if __name__ == "__main__":
     unittest.main()

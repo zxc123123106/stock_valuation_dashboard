@@ -1,21 +1,24 @@
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, time
 from decimal import Decimal, InvalidOperation
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
 from .brokers import BrokerConfig, broker_options, get_broker, transaction_tax_rate
+from .ai_analysis import AIAnalysisError, AIConfigurationError, build_ai_provider, normalize_ai_analysis, stock_summary_hash
 from .config import get_settings
 from .database import (
     CrawlerLog,
     DATABASE_URL,
     Stock,
+    StockAIAnalysis,
     StockBrokerTrading,
     StockBrokerTradingRow,
     StockDailyPrice,
@@ -45,6 +48,8 @@ from .schemas import (
     RefreshQueueResponse,
     RefreshStatusResponse,
     StockDeleteResponse,
+    StockAIAnalysisRequest,
+    StockAIAnalysisResponse,
     StockMetricResponse,
     StockPositionRequest,
     StockPositionResponse,
@@ -533,6 +538,124 @@ def _technical_analysis_response(stock: Stock, session: Session, limit: int) -> 
     )
 
 
+def _schema_dump(value):
+    return value.model_dump(mode="json") if value is not None else None
+
+
+def _ratio_percent(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator is None or denominator == 0:
+        return None
+    return round((numerator - denominator) / denominator * 100, 2)
+
+
+def _technical_summary_for_ai(stock: Stock, session: Session) -> dict:
+    analysis = _technical_analysis_response(stock, session, 120)
+    latest = analysis.candles[-1] if analysis.candles else None
+    if not latest:
+        return {
+            "interval": "1d",
+            "source": analysis.source,
+            "fetched_at": analysis.fetched_at.isoformat() if analysis.fetched_at else None,
+            "latest": None,
+        }
+
+    ma_values = {
+        "ma5": latest.ma5,
+        "ma10": latest.ma10,
+        "ma20": latest.ma20,
+        "ma60": latest.ma60,
+        "ma120": latest.ma120,
+        "ma240": latest.ma240,
+    }
+    return {
+        "interval": analysis.interval,
+        "source": analysis.source,
+        "fetched_at": analysis.fetched_at.isoformat() if analysis.fetched_at else None,
+        "latest": {
+            "date": latest.date.isoformat(),
+            "close": latest.close,
+            "is_provisional": latest.is_provisional,
+            **ma_values,
+            "price_vs_ma20_percent": _ratio_percent(latest.close, latest.ma20),
+            "volume_lots": latest.volume,
+            "volume_ma5_lots": latest.volume_ma5,
+            "volume_ma20_lots": latest.volume_ma20,
+            "volume_vs_ma20_percent": latest.volume_vs_ma20_percent,
+        },
+    }
+
+
+def _ai_stock_summary(stock: Stock, session: Session) -> dict:
+    stock_response = _stock_response(stock, session)
+    broker_trading = stock_response.broker_trading
+    return {
+        "symbol": stock_response.symbol,
+        "name": stock_response.name,
+        "asset_type": stock_response.asset_type,
+        "market": stock_response.market,
+        "currency": stock_response.currency,
+        "summary_version": 1,
+        "quote": _schema_dump(stock_response.metric),
+        "position": _schema_dump(stock_response.position),
+        "valuations": [_schema_dump(valuation) for valuation in stock_response.valuations],
+        "fundamental": _schema_dump(stock_response.fundamental),
+        "technical": _technical_summary_for_ai(stock, session),
+        "chip": None
+        if broker_trading is None
+        else {
+            "trade_date": broker_trading.trade_date,
+            "main_net_volume": broker_trading.main_net_volume,
+            "main_buy_volume": broker_trading.main_buy_volume,
+            "main_sell_volume": broker_trading.main_sell_volume,
+            "volume_ratio_percent": broker_trading.volume_ratio_percent,
+            "source": broker_trading.source,
+            "fetched_at": broker_trading.fetched_at.isoformat(),
+        },
+        "constraints": {
+            "raw_candles_included": False,
+            "full_broker_rows_included": False,
+            "share_count_included": False,
+            "account_information_included": False,
+        },
+    }
+
+
+def _ai_analysis_response(row: StockAIAnalysis, cached: bool) -> StockAIAnalysisResponse:
+    try:
+        analysis_payload = json.loads(row.response_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Cached AI analysis is invalid.") from exc
+    return StockAIAnalysisResponse(
+        provider=row.provider,
+        model=row.model,
+        cached=cached,
+        analysis_date=row.analysis_date,
+        generated_at=row.updated_at,
+        analysis=normalize_ai_analysis(analysis_payload),
+    )
+
+
+def _ai_analysis_is_cacheable(row: StockAIAnalysis | None) -> bool:
+    if row is None or row.status != "success":
+        return False
+    try:
+        payload = json.loads(row.response_json)
+    except json.JSONDecodeError:
+        return False
+    if isinstance(payload, dict) and isinstance(payload.get("analysis"), dict):
+        payload = payload["analysis"]
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("format_valid", True) is not True:
+        return False
+    risk_points = payload.get("risk_points") or []
+    if any("格式不是 JSON" in str(point) for point in risk_points):
+        return False
+    if "格式不是 JSON" in str(payload.get("summary") or ""):
+        return False
+    return True
+
+
 def _as_taipei(value: datetime) -> datetime:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
@@ -658,6 +781,96 @@ def get_stock(symbol: str, session: Session = Depends(get_session)) -> StockResp
     return _stock_response(stock, session)
 
 
+@app.post("/api/stocks/{symbol}/ai-analysis", response_model=StockAIAnalysisResponse)
+def create_stock_ai_analysis(
+    symbol: str,
+    payload: StockAIAnalysisRequest = Body(default_factory=StockAIAnalysisRequest),
+    session: Session = Depends(get_session),
+) -> StockAIAnalysisResponse:
+    try:
+        normalized_symbol = normalize_symbol(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    stock = session.scalar(select(Stock).where(Stock.symbol == normalized_symbol, Stock.is_active.is_(True)))
+    if not stock:
+        raise HTTPException(status_code=404, detail="Stock not found")
+
+    try:
+        provider = build_ai_provider(settings, payload.provider)
+    except AIConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    stock_summary = _ai_stock_summary(stock, session)
+    input_hash = stock_summary_hash(stock_summary)
+    analysis_date = datetime.now(TAIPEI_TZ).date()
+    cached_analysis = session.scalar(
+        select(StockAIAnalysis)
+        .where(
+            StockAIAnalysis.stock_id == stock.id,
+            StockAIAnalysis.provider == provider.provider_id,
+            StockAIAnalysis.model == provider.model,
+            StockAIAnalysis.analysis_date == analysis_date,
+            StockAIAnalysis.input_hash == input_hash,
+            StockAIAnalysis.status == "success",
+        )
+        .order_by(StockAIAnalysis.updated_at.desc())
+        .limit(1)
+    )
+    if not _ai_analysis_is_cacheable(cached_analysis):
+        cached_analysis = None
+
+    if cached_analysis and not payload.force_refresh:
+        return _ai_analysis_response(cached_analysis, cached=True)
+
+    request_payload_json = json.dumps(stock_summary, ensure_ascii=False, sort_keys=True)
+    row = cached_analysis or session.scalar(
+        select(StockAIAnalysis)
+        .where(
+            StockAIAnalysis.stock_id == stock.id,
+            StockAIAnalysis.provider == provider.provider_id,
+            StockAIAnalysis.model == provider.model,
+            StockAIAnalysis.analysis_date == analysis_date,
+            StockAIAnalysis.input_hash == input_hash,
+        )
+        .limit(1)
+    )
+    if row is None:
+        row = StockAIAnalysis(
+            stock_id=stock.id,
+            provider=provider.provider_id,
+            model=provider.model,
+            analysis_date=analysis_date,
+            input_hash=input_hash,
+            request_payload_json=request_payload_json,
+            response_json="{}",
+            status="queued",
+        )
+        session.add(row)
+
+    try:
+        analysis = provider.analyze_stock(stock_summary)
+    except AIAnalysisError as exc:
+        now = datetime.now(UTC)
+        row.request_payload_json = request_payload_json
+        row.response_json = "{}"
+        row.status = "failed"
+        row.error_message = str(exc)
+        row.updated_at = now
+        session.commit()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    now = datetime.now(UTC)
+    row.request_payload_json = request_payload_json
+    row.response_json = json.dumps(analysis.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+    row.status = "success"
+    row.error_message = None
+    row.updated_at = now
+    session.commit()
+    session.refresh(row)
+    return _ai_analysis_response(row, cached=False)
+
+
 @app.get("/api/stocks/{symbol}/technical-analysis", response_model=TechnicalAnalysisResponse)
 def get_technical_analysis(
     symbol: str,
@@ -704,6 +917,7 @@ async def delete_stock(symbol: str, session: Session = Depends(get_session)) -> 
     session.execute(delete(StockPEHistory).where(StockPEHistory.stock_id == stock.id))
     session.execute(delete(StockMonthlyRevenue).where(StockMonthlyRevenue.stock_id == stock.id))
     session.execute(delete(StockFinancialQuarter).where(StockFinancialQuarter.stock_id == stock.id))
+    session.execute(delete(StockAIAnalysis).where(StockAIAnalysis.stock_id == stock.id))
     session.execute(delete(StockRefreshState).where(StockRefreshState.symbol == normalized_symbol))
     session.execute(delete(CrawlerLog).where(CrawlerLog.job_name == f"market_refresh:{normalized_symbol}"))
     session.delete(stock)

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Generator
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, create_engine, delete, func, or_, select, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, create_engine, delete, func, or_, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -83,6 +83,7 @@ class Stock(Base):
     pe_history: Mapped[list["StockPEHistory"]] = relationship(back_populates="stock")
     monthly_revenues: Mapped[list["StockMonthlyRevenue"]] = relationship(back_populates="stock")
     financial_quarters: Mapped[list["StockFinancialQuarter"]] = relationship(back_populates="stock")
+    ai_analyses: Mapped[list["StockAIAnalysis"]] = relationship(back_populates="stock")
 
 
 class StockMetric(Base):
@@ -303,6 +304,35 @@ class StockRefreshState(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class StockAIAnalysis(Base):
+    __tablename__ = "stock_ai_analyses"
+    __table_args__ = (
+        UniqueConstraint(
+            "stock_id",
+            "provider",
+            "model",
+            "analysis_date",
+            "input_hash",
+            name="uq_stock_ai_analysis_cache",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(24), index=True)
+    model: Mapped[str] = mapped_column(String(120))
+    analysis_date: Mapped[date] = mapped_column(Date, index=True)
+    input_hash: Mapped[str] = mapped_column(String(64), index=True)
+    request_payload_json: Mapped[str] = mapped_column(Text)
+    response_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(24), default="success")
+    error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    stock: Mapped[Stock] = relationship(back_populates="ai_analyses")
 
 
 class AppMaintenanceState(Base):
