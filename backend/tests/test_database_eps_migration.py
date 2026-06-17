@@ -3,15 +3,64 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
-from backend.app.database import Base, Stock, StockEPS, StockValuation, ensure_analysis_cache_columns, remove_legacy_histock_eps
+from backend.app.database import Base, Stock, StockEPS, StockValuation, apply_layered_stock_refresh, ensure_analysis_cache_columns, remove_legacy_histock_eps
 import backend.app.database as database
 
 
 class EpsSourceMigrationTest(unittest.TestCase):
+    def test_negative_eps_with_no_valid_pe_does_not_create_valuations(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        now = datetime.now(UTC)
+
+        profile = SimpleNamespace(
+            symbol="3149",
+            name="正達",
+            asset_type="STOCK",
+            market="TWSE",
+            currency="TWD",
+        )
+        quote = SimpleNamespace(
+            open_price=Decimal("90.00"),
+            previous_close=Decimal("87.40"),
+            day_high=Decimal("90.00"),
+            day_low=Decimal("87.70"),
+            current_price=Decimal("88.00"),
+            change_percent=Decimal("-2.22"),
+            price_updated_at=now,
+        )
+        eps_rows = [
+            SimpleNamespace(eps_type="TTM", eps_value=Decimal("-2.47"), eps_period="2026Q1 + 2025Q4 + 2025Q3 + 2025Q2"),
+            SimpleNamespace(eps_type="LAST_YEAR", eps_value=Decimal("-2.88"), eps_period="2025"),
+        ]
+
+        with Session(engine) as session:
+            apply_layered_stock_refresh(
+                session,
+                profile=profile,
+                quote=quote,
+                current_pe=None,
+                pe_updated_at=None,
+                eps_rows=eps_rows,
+                eps_updated_at=now,
+                source="test",
+                calculated_at=now,
+            )
+            session.commit()
+
+            valuation_count = session.scalar(select(func.count()).select_from(StockValuation))
+            eps_count = session.scalar(select(func.count()).select_from(StockEPS))
+
+        engine.dispose()
+
+        self.assertEqual(eps_count, 2)
+        self.assertEqual(valuation_count, 0)
+
     def test_analysis_cache_columns_are_added_to_existing_tables(self) -> None:
         old_engine = database.engine
         engine = create_engine("sqlite:///:memory:")

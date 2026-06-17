@@ -155,7 +155,7 @@ def fetch_stock_pe(
     session = _build_session()
     rows = _get_json(session, f"{TWSE_OPENAPI_BASE_URL}/exchangeReport/BWIBBU_ALL")
     row = next((item for item in rows if isinstance(item, dict) and item.get("Code") == normalized_symbol), None)
-    twse_pe = _optional_money(row.get("PEratio")) if row else None
+    twse_pe = _positive_pe(_optional_money(row.get("PEratio"))) if row else None
     if twse_pe is not None:
         return twse_pe
 
@@ -278,10 +278,10 @@ def fetch_institutional_trading(
     return _parse_institutional_trading(normalized_symbol, payload)[-days:]
 
 
-def derive_pe(current_price: Decimal, eps_rows: list[EpsSnapshot]) -> Decimal:
+def derive_pe(current_price: Decimal, eps_rows: list[EpsSnapshot]) -> Decimal | None:
     ttm = next((row.eps_value for row in eps_rows if row.eps_type == "TTM"), None)
-    if not ttm:
-        raise ValueError("Could not derive P/E without TTM EPS.")
+    if not ttm or ttm <= 0:
+        return None
     return (current_price / ttm).quantize(MONEY, rounding=ROUND_HALF_UP)
 
 
@@ -556,7 +556,7 @@ def _parse_pe_history(symbol: str, payload: list[dict]) -> list[PEHistorySnapsho
         snapshots.append(
             PEHistorySnapshot(
                 trade_date=trade_date,
-                per=_optional_money(row.get("PER")),
+                per=_positive_pe(_optional_money(row.get("PER"))),
                 pbr=_optional_money(row.get("PBR")),
                 dividend_yield=_optional_money(row.get("dividend_yield")),
                 source="FinMind TaiwanStockPER",
@@ -640,6 +640,12 @@ def _optional_money(value) -> Decimal | None:
     if parsed is None:
         return None
     return parsed.quantize(MONEY, rounding=ROUND_HALF_UP)
+
+
+def _positive_pe(value: Decimal | None) -> Decimal | None:
+    if value is None or value <= 0:
+        return None
+    return value
 
 
 def _optional_decimal(value) -> Decimal | None:

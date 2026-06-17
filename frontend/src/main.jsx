@@ -46,6 +46,16 @@ import "./styles.css";
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 const POLL_SECONDS = 5;
 const BACKGROUND_REFRESH_SECONDS = 60;
+const MA_PERIODS = [5, 10, 20, 60, 120, 240];
+const MA_VISIBILITY_STORAGE_KEY = "stock-dashboard-visible-ma-lines";
+const MA_LINE_COLORS = {
+  5: "#f08f7f",
+  10: "#e2c879",
+  20: "#7fd8ff",
+  60: "#b99cff",
+  120: "#8be0b2",
+  240: "#f2a7d8",
+};
 
 const EPS_LABELS = {
   TTM: "近四季",
@@ -83,11 +93,32 @@ function formatOptionalNumber(value, digits = 2) {
   return formatNumber(value, digits);
 }
 
+function formatOptionalChartNumber(value, digits = 2) {
+  if (value === null || value === undefined) {
+    return "—";
+  }
+  return formatNumber(value, digits);
+}
+
+function formatOptionalPe(value) {
+  if (value === null || value === undefined) {
+    return "不適用";
+  }
+  return formatNumber(value);
+}
+
 function formatOptionalSignedPercent(value, digits = 2) {
   if (value === null || value === undefined) {
     return "—";
   }
   return `${formatSignedNumber(value, digits)}%`;
+}
+
+function formatOptionalPercent(value, digits = 2) {
+  if (value === null || value === undefined) {
+    return "—";
+  }
+  return `${formatNumber(value, digits)}%`;
 }
 
 function formatPeRange(minValue, maxValue) {
@@ -117,6 +148,32 @@ function percentageToneClass(value) {
     return "";
   }
   return value >= 0 ? "percentage-positive" : "percentage-negative";
+}
+
+function defaultMaVisibility() {
+  return Object.fromEntries(MA_PERIODS.map((period) => [period, false]));
+}
+
+function loadMaVisibility() {
+  const fallback = defaultMaVisibility();
+  try {
+    const stored = window.localStorage.getItem(MA_VISIBILITY_STORAGE_KEY);
+    if (!stored) {
+      return fallback;
+    }
+    const parsed = JSON.parse(stored);
+    return Object.fromEntries(MA_PERIODS.map((period) => [period, Boolean(parsed?.[period])]));
+  } catch {
+    return fallback;
+  }
+}
+
+function storeMaVisibility(visibility) {
+  try {
+    window.localStorage.setItem(MA_VISIBILITY_STORAGE_KEY, JSON.stringify(visibility));
+  } catch {
+    // Ignore storage failures; the chart still works for the current session.
+  }
 }
 
 function comparisonPercent(currentPrice, indicatorPrice) {
@@ -887,6 +944,7 @@ const StockCard = React.forwardRef(function StockCard(
   const pendingRefresh = isPendingRefresh(refreshState);
   const statusLabel = REFRESH_STATUS_LABELS[refreshState?.status] || refreshState?.status;
   const isEtf = stock.asset_type === "ETF";
+  const peNotApplicable = !isEtf && metric && (metric.current_pe === null || metric.current_pe === undefined);
   const [fundamentalExpanded, setFundamentalExpanded] = useState(false);
   const [brokerTradingExpanded, setBrokerTradingExpanded] = useState(false);
   const [technicalExpanded, setTechnicalExpanded] = useState(false);
@@ -994,7 +1052,7 @@ const StockCard = React.forwardRef(function StockCard(
           <div className="metric-tile pe-tile">
             <div className="quote-current-row">
               <span className="metric-label">目前PE</span>
-              <strong>{formatOptionalNumber(metric?.current_pe)}</strong>
+              <strong>{metric ? formatOptionalPe(metric.current_pe) : "待更新"}</strong>
             </div>
             <div className="quote-comparison-grid pe-history-grid">
               <div className="quote-comparison-item">
@@ -1062,6 +1120,11 @@ const StockCard = React.forwardRef(function StockCard(
                 </span>
               </div>
             ))
+          ) : peNotApplicable ? (
+            <div className="valuation-empty">
+              <Wifi size={15} />
+              PE 不適用，無法建立 EPS × PE 估值
+            </div>
           ) : (
             <div className="valuation-empty">
               <Wifi size={15} />
@@ -1152,7 +1215,7 @@ function TechnicalAnalysisDisclosure({ symbol, metricUpdatedAt, expanded, onTogg
           {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
           技術分析
         </span>
-        <small>日線 · MA20</small>
+        <small>日線 · MA</small>
       </button>
       {expanded && (
         <div className="technical-panel">
@@ -1190,6 +1253,15 @@ function DailyCandlestickChart({ candles }) {
   const containerRef = useRef(null);
   const latestCandle = candles[candles.length - 1] || null;
   const [selectedCandle, setSelectedCandle] = useState(latestCandle);
+  const [visibleMaLines, setVisibleMaLines] = useState(() => loadMaVisibility());
+
+  const toggleMaLine = useCallback((period) => {
+    setVisibleMaLines((current) => {
+      const next = { ...current, [period]: !current[period] };
+      storeMaVisibility(next);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     setSelectedCandle(latestCandle);
@@ -1247,18 +1319,21 @@ function DailyCandlestickChart({ candles }) {
       close: candle.close,
     })));
 
-    const ma20Series = chart.addSeries(LineSeries, {
-      color: "#e2c879",
-      lineWidth: 2,
-      priceLineVisible: false,
-      lastValueVisible: true,
-      crosshairMarkerVisible: false,
+    MA_PERIODS.filter((period) => visibleMaLines[period]).forEach((period) => {
+      const key = `ma${period}`;
+      const maSeries = chart.addSeries(LineSeries, {
+        color: MA_LINE_COLORS[period],
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: true,
+        crosshairMarkerVisible: false,
+      });
+      maSeries.setData(
+        candles
+          .filter((candle) => candle[key] !== null && candle[key] !== undefined)
+          .map((candle) => ({ time: candle.date, value: candle[key] })),
+      );
     });
-    ma20Series.setData(
-      candles
-        .filter((candle) => candle.ma20 !== null && candle.ma20 !== undefined)
-        .map((candle) => ({ time: candle.date, value: candle.ma20 })),
-    );
 
     function handleCrosshairMove(param) {
       if (!param.time) {
@@ -1313,30 +1388,67 @@ function DailyCandlestickChart({ candles }) {
       chart.unsubscribeCrosshairMove(handleCrosshairMove);
       chart.remove();
     };
-  }, [candles, latestCandle]);
+  }, [candles, latestCandle, visibleMaLines]);
 
   const summary = selectedCandle || latestCandle;
   return (
     <div className="technical-chart-shell">
       <div className="technical-summary">
-        <div className="technical-summary-date">
-          <span>日期</span>
-          <strong>{formatTradingDate(summary?.date)}</strong>
-          {summary?.is_provisional && <em>暫定 K 棒</em>}
+        <div className="technical-summary-primary">
+          <div className="technical-summary-date">
+            <span>日期</span>
+            <strong>{formatTradingDate(summary?.date)}</strong>
+            {summary?.is_provisional && <em>暫定 K 棒</em>}
+          </div>
+          <TechnicalSummaryValue label="收盤" value={summary?.close} accent />
         </div>
-        <TechnicalSummaryValue label="收盤" value={summary?.close} accent />
-        <TechnicalSummaryValue label="MA20" value={summary?.ma20} accent />
+        <div className="technical-summary-ma">
+          {MA_PERIODS.map((period) => (
+            <TechnicalSummaryValue
+              key={period}
+              label={`MA${period}`}
+              value={summary?.[`ma${period}`]}
+              accent
+            />
+          ))}
+        </div>
+        <div className="technical-summary-volume">
+          <TechnicalSummaryValue label="今日成交量" value={summary?.volume} accent digits={0} suffix=" 張" />
+          <TechnicalSummaryValue label="5 日均量" value={summary?.volume_ma5} accent digits={0} suffix=" 張" />
+          <TechnicalSummaryValue label="20 日均量" value={summary?.volume_ma20} accent digits={0} suffix=" 張" />
+          <TechnicalSummaryValue
+            label="今日量 / 20 日均量"
+            value={summary?.volume_vs_ma20_percent}
+            accent
+            formatter={formatOptionalPercent}
+          />
+        </div>
+      </div>
+      <div className="technical-ma-controls">
+        {MA_PERIODS.map((period) => (
+          <label key={period} className="technical-ma-toggle">
+            <input
+              type="checkbox"
+              checked={Boolean(visibleMaLines[period])}
+              onChange={() => toggleMaLine(period)}
+            />
+            <span style={{ "--ma-color": MA_LINE_COLORS[period] }}>{`MA${period}`}</span>
+          </label>
+        ))}
       </div>
       <div className="technical-chart" ref={containerRef} />
     </div>
   );
 }
 
-function TechnicalSummaryValue({ label, value, accent = false }) {
+function TechnicalSummaryValue({ label, value, accent = false, digits = 2, suffix = "", formatter = null }) {
+  const formattedValue = formatter
+    ? formatter(value, digits)
+    : `${formatOptionalChartNumber(value, digits)}${value === null || value === undefined ? "" : suffix}`;
   return (
     <div>
       <span>{label}</span>
-      <strong className={accent ? "technical-accent-value" : ""}>{formatOptionalNumber(value)}</strong>
+      <strong className={accent ? "technical-accent-value" : ""}>{formattedValue}</strong>
     </div>
   );
 }

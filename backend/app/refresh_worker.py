@@ -832,10 +832,15 @@ def _refresh_symbol_sync(
         source_parts.append("cached daily EPS")
 
     if current_pe is None and eps_rows:
-        current_pe = derive_pe(quote.current_price, eps_rows)
-        pe_updated_at = calculated_at
-        messages.append("PE 已由最新 EPS 推算")
-        source_parts.append("derived PE")
+        derived_pe = derive_pe(quote.current_price, eps_rows)
+        if derived_pe is not None:
+            current_pe = derived_pe
+            pe_updated_at = calculated_at
+            messages.append("PE 已由最新 EPS 推算")
+            source_parts.append("derived PE")
+        else:
+            messages.append("PE 不適用，略過估值")
+            source_parts.append("PE not applicable")
 
     if broker_trading_due:
         try:

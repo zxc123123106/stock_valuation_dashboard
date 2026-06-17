@@ -851,13 +851,33 @@ h1 {
 
 .technical-summary {
   display: grid;
-  grid-template-columns: minmax(160px, 1.5fr) repeat(2, minmax(100px, 1fr));
   gap: 1px;
   background: var(--line-soft);
   border-bottom: 1px solid var(--line-soft);
 }
 
-.technical-summary > div {
+.technical-summary-primary,
+.technical-summary-ma,
+.technical-summary-volume {
+  display: grid;
+  gap: 1px;
+}
+
+.technical-summary-primary {
+  grid-template-columns: minmax(160px, 1fr) minmax(110px, 0.7fr);
+}
+
+.technical-summary-ma {
+  grid-template-columns: repeat(6, minmax(82px, 1fr));
+}
+
+.technical-summary-volume {
+  grid-template-columns: repeat(4, minmax(116px, 1fr));
+}
+
+.technical-summary-primary > div,
+.technical-summary-ma > div,
+.technical-summary-volume > div {
   min-width: 0;
   min-height: 58px;
   padding: 9px 12px;
@@ -899,6 +919,39 @@ h1 {
   font-size: 0.68rem;
   font-style: normal;
   white-space: nowrap;
+}
+
+.technical-ma-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  background: rgba(17, 17, 16, 0.96);
+}
+
+.technical-ma-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.technical-ma-toggle input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--ma-color, var(--gold-strong));
+}
+
+.technical-ma-toggle span {
+  color: var(--ma-color, var(--gold-strong));
 }
 
 .technical-chart {
@@ -1149,11 +1202,22 @@ footer a {
   }
 
   .technical-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow-x: auto;
   }
 
-  .technical-summary-date {
-    grid-column: span 2;
+  .technical-summary-primary {
+    grid-template-columns: repeat(2, minmax(130px, 1fr));
+    min-width: 280px;
+  }
+
+  .technical-summary-ma {
+    grid-template-columns: repeat(3, minmax(96px, 1fr));
+    min-width: 288px;
+  }
+
+  .technical-summary-volume {
+    grid-template-columns: repeat(2, minmax(128px, 1fr));
+    min-width: 256px;
   }
 
   .technical-chart {

@@ -55,6 +55,7 @@ from .schemas import (
     TechnicalCandleResponse,
 )
 from .refresh_worker import BackgroundRefreshManager
+from .technical import MOVING_AVERAGE_PERIODS, moving_averages
 from .valuation import quantize_money, valuation_status
 from .market_data import normalize_symbol
 
@@ -101,6 +102,12 @@ def _float(value: Decimal | None) -> float:
 
 def _optional_float(value: Decimal | None) -> float | None:
     return float(value) if value is not None else None
+
+
+def _optional_positive_float(value: Decimal | None) -> float | None:
+    if value is None or value <= 0:
+        return None
+    return float(value)
 
 
 def _percent(numerator: Decimal, denominator: Decimal) -> Decimal:
@@ -383,7 +390,11 @@ def _stock_response(stock: Stock, session: Session) -> StockResponse:
     if stock.asset_type != "ETF":
         valuations = session.scalars(
             select(StockValuation)
-            .where(StockValuation.stock_id == stock.id)
+            .where(
+                StockValuation.stock_id == stock.id,
+                StockValuation.current_pe > 0,
+                StockValuation.eps_value > 0,
+            )
             .order_by(StockValuation.eps_type.desc())
         ).all()
 
@@ -402,10 +413,10 @@ def _stock_response(stock: Stock, session: Session) -> StockResponse:
             day_low=_optional_float(metric.day_low),
             current_price=_float(metric.current_price),
             change_percent=_optional_float(metric.change_percent),
-            current_pe=_float(metric.current_pe),
-            pe_average_3y=_optional_float(metric.pe_average_3y),
-            pe_min_3y=_optional_float(metric.pe_min_3y),
-            pe_max_3y=_optional_float(metric.pe_max_3y),
+            current_pe=_optional_positive_float(metric.current_pe),
+            pe_average_3y=_optional_positive_float(metric.pe_average_3y),
+            pe_min_3y=_optional_positive_float(metric.pe_min_3y),
+            pe_max_3y=_optional_positive_float(metric.pe_max_3y),
             pe_vs_average_percent=_optional_float(metric.pe_vs_average_percent),
             price_updated_at=metric.price_updated_at,
             pe_updated_at=metric.pe_updated_at,
@@ -421,11 +432,12 @@ def _stock_response(stock: Stock, session: Session) -> StockResponse:
 
 
 def _technical_analysis_response(stock: Stock, session: Session, limit: int) -> TechnicalAnalysisResponse:
+    ma_lookback = max(MOVING_AVERAGE_PERIODS) - 1
     rows = session.scalars(
         select(StockDailyPrice)
         .where(StockDailyPrice.stock_id == stock.id)
         .order_by(StockDailyPrice.trade_date.desc())
-        .limit(limit + 19)
+        .limit(limit + ma_lookback)
     ).all()
     candles = [
         {
@@ -470,12 +482,22 @@ def _technical_analysis_response(stock: Stock, session: Session, limit: int) -> 
             candles.append(provisional)
 
     rolling_closes: list[Decimal] = []
+    rolling_volumes: list[Decimal] = []
     response_candles = []
     for candle in candles:
         rolling_closes.append(candle["close"])
-        if len(rolling_closes) > 20:
+        if len(rolling_closes) > max(MOVING_AVERAGE_PERIODS):
             rolling_closes.pop(0)
-        ma20 = sum(rolling_closes, Decimal("0")) / Decimal("20") if len(rolling_closes) == 20 else None
+        ma_values = moving_averages(rolling_closes)
+        volume_lots = _volume_lots(candle["volume"])
+        if volume_lots is not None:
+            rolling_volumes.append(volume_lots)
+            if len(rolling_volumes) > 20:
+                rolling_volumes.pop(0)
+            volume_ma_values = moving_averages(rolling_volumes, periods=(5, 20))
+        else:
+            volume_ma_values = {5: None, 20: None}
+        volume_ma20 = volume_ma_values[20]
         response_candles.append(
             TechnicalCandleResponse(
                 date=candle["date"],
@@ -483,8 +505,16 @@ def _technical_analysis_response(stock: Stock, session: Session, limit: int) -> 
                 high=_float(candle["high"]),
                 low=_float(candle["low"]),
                 close=_float(candle["close"]),
-                volume=candle["volume"],
-                ma20=_float(ma20) if ma20 is not None else None,
+                volume=_optional_float(volume_lots),
+                volume_ma5=_optional_float(volume_ma_values[5]),
+                volume_ma20=_optional_float(volume_ma20),
+                volume_vs_ma20_percent=_optional_float(_volume_vs_ma20_percent(volume_lots, volume_ma20)),
+                ma5=_optional_float(ma_values[5]),
+                ma10=_optional_float(ma_values[10]),
+                ma20=_optional_float(ma_values[20]),
+                ma60=_optional_float(ma_values[60]),
+                ma120=_optional_float(ma_values[120]),
+                ma240=_optional_float(ma_values[240]),
                 is_provisional=candle["is_provisional"],
             )
         )
@@ -511,6 +541,18 @@ def _as_taipei(value: datetime) -> datetime:
 
 def _market_is_open(now: datetime) -> bool:
     return now.weekday() < 5 and MARKET_OPEN_TIME <= now.time().replace(tzinfo=None) < MARKET_CLOSE_TIME
+
+
+def _volume_lots(volume: int | None) -> Decimal | None:
+    if volume is None:
+        return None
+    return (Decimal(volume) / Decimal("1000")).quantize(Decimal("0.01"))
+
+
+def _volume_vs_ma20_percent(volume_lots: Decimal | None, volume_ma20: Decimal | None) -> Decimal | None:
+    if volume_lots is None or volume_ma20 is None or volume_ma20 == 0:
+        return None
+    return ((volume_lots / volume_ma20) * Decimal("100")).quantize(Decimal("0.01"))
 
 
 @app.get("/api/health", response_model=HealthResponse)

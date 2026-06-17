@@ -34,7 +34,7 @@ class StockMetricResponse(BaseModel):
     day_low: float | None = None
     current_price: float
     change_percent: float | None = None
-    current_pe: float
+    current_pe: float | None = None
     pe_average_3y: float | None = None
     pe_min_3y: float | None = None
     pe_max_3y: float | None = None
@@ -112,8 +112,16 @@ class TechnicalCandleResponse(BaseModel):
     high: float
     low: float
     close: float
-    volume: int | None = None
+    volume: float | None = None
+    volume_ma5: float | None = None
+    volume_ma20: float | None = None
+    volume_vs_ma20_percent: float | None = None
+    ma5: float | None = None
+    ma10: float | None = None
     ma20: float | None = None
+    ma60: float | None = None
+    ma120: float | None = None
+    ma240: float | None = None
     is_provisional: bool = False
 
 

@@ -157,7 +157,7 @@ curl http://127.0.0.1:8000/api/stocks
 
 - 股票與 ETF 股價每 `BACKGROUND_REFRESH_SECONDS` 更新一次，預設為 `60` 秒；資料來源依序為 FinMind sponsor 即時快照、TWSE MIS、FinMind `TaiwanStockPrice` 最近收盤。
 - 主力進出每日更新一次，股票與 ETF 都會抓取。
-- 日線使用 FinMind `TaiwanStockPrice` 每日更新一次，股票與 ETF 都會保存最近約 240 個日曆日的歷史資料；盤中另以現價快取補上當日暫定 K 棒。
+- 日線使用 FinMind `TaiwanStockPrice` 每日更新一次，股票與 ETF 都會保存最近約 600 個日曆日的歷史資料；盤中另以現價快取補上當日暫定 K 棒。
 - 目前PE優先使用 TWSE OpenAPI；TWSE 無資料時 fallback 到 FinMind `TaiwanStockPER` 最新 PER。
 - 近三年平均PE與PE區間使用 FinMind `TaiwanStockPER`。
 - EPS 與季度基本面使用 FinMind `TaiwanStockFinancialStatements`，月營收使用 FinMind `TaiwanStockMonthRevenue`，並在台北時間每日 `09:00` 後第一輪自動更新一次，只適用股票。

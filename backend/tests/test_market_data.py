@@ -9,6 +9,7 @@ from backend.app.market_data import (
     _parse_finmind_eps,
     _parse_monthly_revenues,
     _parse_pe_history,
+    derive_pe,
     fetch_stock_pe,
     fetch_stock_profile,
 )
@@ -111,6 +112,16 @@ class TwseMisQuoteParserTest(unittest.TestCase):
 
 
 class FinMindFundamentalParserTest(unittest.TestCase):
+    def test_derive_pe_returns_none_for_negative_ttm_eps(self) -> None:
+        current_pe = derive_pe(
+            Decimal("88.00"),
+            [
+                type("Eps", (), {"eps_type": "TTM", "eps_value": Decimal("-2.47")})(),
+            ],
+        )
+
+        self.assertIsNone(current_pe)
+
     def test_fetch_stock_pe_falls_back_to_finmind_per(self) -> None:
         import backend.app.market_data as market_data
 
@@ -129,6 +140,23 @@ class FinMindFundamentalParserTest(unittest.TestCase):
 
         self.assertEqual(current_pe, Decimal("21.50"))
 
+    def test_fetch_stock_pe_treats_zero_twse_pe_as_not_applicable(self) -> None:
+        import backend.app.market_data as market_data
+
+        original_get_json = market_data._get_json
+        original_fetch_finmind_data = market_data._fetch_finmind_data
+        market_data._get_json = lambda *_args, **_kwargs: [{"Code": "3149", "PEratio": "0"}]
+        market_data._fetch_finmind_data = lambda *_args, **_kwargs: [
+            {"date": "2026-06-14", "stock_id": "3149", "dividend_yield": 0, "PER": 0, "PBR": 8.1},
+        ]
+        try:
+            current_pe = fetch_stock_pe("3149")
+        finally:
+            market_data._get_json = original_get_json
+            market_data._fetch_finmind_data = original_fetch_finmind_data
+
+        self.assertIsNone(current_pe)
+
     def test_parse_pe_history(self) -> None:
         rows = _parse_pe_history(
             "2330",
@@ -142,6 +170,18 @@ class FinMindFundamentalParserTest(unittest.TestCase):
         self.assertEqual(rows[-1].per, Decimal("21.50"))
         self.assertEqual(rows[-1].pbr, Decimal("5.30"))
         self.assertEqual(rows[-1].dividend_yield, Decimal("2.20"))
+
+    def test_parse_pe_history_treats_non_positive_per_as_none(self) -> None:
+        rows = _parse_pe_history(
+            "3149",
+            [
+                {"date": "2026-06-13", "stock_id": "3149", "dividend_yield": 0, "PER": 0, "PBR": 7.9},
+                {"date": "2026-06-14", "stock_id": "3149", "dividend_yield": 0, "PER": -1, "PBR": 8.1},
+            ],
+        )
+
+        self.assertIsNone(rows[0].per)
+        self.assertIsNone(rows[1].per)
 
     def test_parse_monthly_revenues_calculates_mom_and_yoy(self) -> None:
         rows = _parse_monthly_revenues(

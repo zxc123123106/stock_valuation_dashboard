@@ -9,7 +9,7 @@ import requests
 
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 MONEY = Decimal("0.01")
-HISTORY_CALENDAR_DAYS = 240
+HISTORY_CALENDAR_DAYS = 600
 
 
 @dataclass(frozen=True)

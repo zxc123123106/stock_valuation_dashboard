@@ -749,13 +749,12 @@ def apply_layered_stock_refresh(
         .order_by(StockMetric.created_at.desc())
         .limit(1)
     )
-    metric_pe = current_pe
+    metric_pe = _positive_pe(current_pe)
     metric_pe_updated_at = pe_updated_at
     if metric_pe is None and latest_metric:
-        metric_pe = latest_metric.current_pe
+        metric_pe = _positive_pe(latest_metric.current_pe)
         metric_pe_updated_at = latest_metric.pe_updated_at
-    if metric_pe is None:
-        metric_pe = Decimal("0.00")
+    stored_metric_pe = metric_pe or Decimal("0.00")
     if metric_pe_updated_at is None:
         metric_pe_updated_at = quote.price_updated_at
 
@@ -768,7 +767,7 @@ def apply_layered_stock_refresh(
             day_low=quote.day_low,
             current_price=quote.current_price,
             change_percent=quote.change_percent,
-            current_pe=metric_pe,
+            current_pe=stored_metric_pe,
             pe_average_3y=latest_metric.pe_average_3y if latest_metric else None,
             pe_min_3y=latest_metric.pe_min_3y if latest_metric else None,
             pe_max_3y=latest_metric.pe_max_3y if latest_metric else None,
@@ -817,7 +816,12 @@ def apply_layered_stock_refresh(
     session.execute(delete(StockValuation).where(StockValuation.stock_id == stock.id))
     session.flush()
 
+    if metric_pe is None:
+        return stock
+
     for eps_type, eps_value, _ in valuation_inputs:
+        if eps_value <= 0:
+            continue
         estimated = estimate_price(eps_value, metric_pe)
         price_difference = estimated - quote.current_price
         percent = difference_percent(quote.current_price, estimated)
@@ -1023,6 +1027,10 @@ def _update_latest_metric_pe_summary(session: Session, stock: Stock) -> None:
         if value is not None and value > 0
     ]
     if not pe_values:
+        latest_metric.pe_average_3y = None
+        latest_metric.pe_min_3y = None
+        latest_metric.pe_max_3y = None
+        latest_metric.pe_vs_average_percent = None
         return
 
     pe_average = (sum(pe_values, Decimal("0.00")) / Decimal(len(pe_values))).quantize(Decimal("0.01"))
@@ -1033,9 +1041,15 @@ def _update_latest_metric_pe_summary(session: Session, stock: Stock) -> None:
 
 
 def _pe_vs_average_percent(current_pe: Decimal | None, average_pe: Decimal | None) -> Decimal | None:
-    if current_pe is None or average_pe is None or average_pe == 0:
+    if current_pe is None or current_pe <= 0 or average_pe is None or average_pe <= 0:
         return None
     return ((current_pe - average_pe) / average_pe * Decimal("100")).quantize(Decimal("0.01"))
+
+
+def _positive_pe(value: Decimal | None) -> Decimal | None:
+    if value is None or value <= 0:
+        return None
+    return value
 
 
 def next_display_order(session: Session) -> int:
