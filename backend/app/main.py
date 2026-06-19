@@ -1,18 +1,33 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, status
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Response, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
 from .brokers import BrokerConfig, broker_options, get_broker, transaction_tax_rate
-from .ai_analysis import AIAnalysisError, AIConfigurationError, build_ai_provider, normalize_ai_analysis, stock_summary_hash
+from .ai_analysis import (
+    AI_MODE_HELD,
+    AI_MODE_UNHELD,
+    PROMPT_VERSION,
+    AIAnalysisError,
+    AIConfigurationError,
+    ai_provider_identity,
+    build_ai_provider,
+    normalize_ai_analysis,
+    normalize_ai_analysis_with_errors,
+    stock_summary_hash,
+)
 from .config import get_settings
 from .database import (
     CrawlerLog,
@@ -49,6 +64,8 @@ from .schemas import (
     RefreshStatusResponse,
     StockDeleteResponse,
     StockAIAnalysisRequest,
+    StockAIAnalysisModesResponse,
+    StockAIAnalysisResultResponse,
     StockAIAnalysisResponse,
     StockMetricResponse,
     StockPositionRequest,
@@ -573,65 +590,126 @@ def _technical_summary_for_ai(stock: Stock, session: Session) -> dict:
         "fetched_at": analysis.fetched_at.isoformat() if analysis.fetched_at else None,
         "latest": {
             "date": latest.date.isoformat(),
-            "close": latest.close,
+            "close_price_twd": latest.close,
             "is_provisional": latest.is_provisional,
             **ma_values,
             "price_vs_ma20_percent": _ratio_percent(latest.close, latest.ma20),
-            "volume_lots": latest.volume,
+            "today_volume_lots": latest.volume,
             "volume_ma5_lots": latest.volume_ma5,
             "volume_ma20_lots": latest.volume_ma20,
-            "volume_vs_ma20_percent": latest.volume_vs_ma20_percent,
+            "volume_as_percent_of_ma20": latest.volume_vs_ma20_percent,
+            "volume_difference_vs_ma20_percent": (
+                round(latest.volume_vs_ma20_percent - 100, 2)
+                if latest.volume_vs_ma20_percent is not None
+                else None
+            ),
         },
     }
 
 
-def _ai_stock_summary(stock: Stock, session: Session) -> dict:
+def _ai_stock_summary(stock: Stock, session: Session, analysis_mode: str) -> dict:
     stock_response = _stock_response(stock, session)
     broker_trading = stock_response.broker_trading
-    return {
+    metric = stock_response.metric
+    summary = {
         "symbol": stock_response.symbol,
         "name": stock_response.name,
         "asset_type": stock_response.asset_type,
         "market": stock_response.market,
         "currency": stock_response.currency,
-        "summary_version": 1,
-        "quote": _schema_dump(stock_response.metric),
-        "position": _schema_dump(stock_response.position),
-        "valuations": [_schema_dump(valuation) for valuation in stock_response.valuations],
+        "summary_version": 2,
+        "prompt_version": PROMPT_VERSION,
+        "analysis_mode": analysis_mode,
+        "quote": None
+        if metric is None
+        else {
+            "current_price_twd": metric.current_price,
+            "open_price_twd": metric.open_price,
+            "previous_close_twd": metric.previous_close,
+            "day_high_twd": metric.day_high,
+            "day_low_twd": metric.day_low,
+            "price_updated_at": metric.price_updated_at.isoformat(),
+            "source": metric.source,
+        },
+        "pe_context": None
+        if metric is None
+        else {
+            "current_pe": metric.current_pe,
+            "pe_average_3y": metric.pe_average_3y,
+            "pe_min_3y": metric.pe_min_3y,
+            "pe_max_3y": metric.pe_max_3y,
+            "current_pe_vs_average_percent": metric.pe_vs_average_percent,
+            "pe_updated_at": metric.pe_updated_at.isoformat(),
+        },
+        "valuation_scenarios": [
+            _ai_valuation_summary(valuation, analysis_mode)
+            for valuation in stock_response.valuations
+        ],
         "fundamental": _schema_dump(stock_response.fundamental),
         "technical": _technical_summary_for_ai(stock, session),
         "chip": None
         if broker_trading is None
         else {
             "trade_date": broker_trading.trade_date,
-            "main_net_volume": broker_trading.main_net_volume,
-            "main_buy_volume": broker_trading.main_buy_volume,
-            "main_sell_volume": broker_trading.main_sell_volume,
+            "main_net_volume_lots": broker_trading.main_net_volume,
+            "main_buy_volume_lots": abs(broker_trading.main_buy_volume),
+            "main_sell_volume_lots": abs(broker_trading.main_sell_volume),
             "volume_ratio_percent": broker_trading.volume_ratio_percent,
             "source": broker_trading.source,
             "fetched_at": broker_trading.fetched_at.isoformat(),
         },
-        "constraints": {
-            "raw_candles_included": False,
-            "full_broker_rows_included": False,
-            "share_count_included": False,
-            "account_information_included": False,
-        },
     }
+    if analysis_mode == AI_MODE_HELD:
+        position = stock_response.position
+        if position is None:
+            raise ValueError("HELD analysis requires a stock position.")
+        summary["position"] = {
+            "average_cost_price_twd": position.buy_price,
+            "unrealized_profit_loss_per_share_twd": position.unrealized_profit_loss,
+            "unrealized_return_percent": position.unrealized_profit_loss_percent,
+            "fee_adjusted_profit_loss_per_share_twd": position.fee_adjusted_profit_loss,
+            "fee_adjusted_return_percent": position.fee_adjusted_profit_loss_percent,
+            "broker_id": position.broker_id,
+            "broker_fee_rate": position.broker_fee_rate,
+        }
+    return summary
 
 
-def _ai_analysis_response(row: StockAIAnalysis, cached: bool) -> StockAIAnalysisResponse:
+def _ai_valuation_summary(valuation: StockValuationResponse, analysis_mode: str) -> dict:
+    result = {
+        "eps_type": valuation.eps_type,
+        "eps_value": valuation.eps_value,
+        "eps_period": valuation.eps_period,
+        "mechanical_eps_times_current_pe_price_twd": valuation.estimated_price,
+        "mechanical_price_vs_current_price_percent": valuation.difference_percent,
+        "scenario_label": valuation.valuation_status,
+        "calculated_at": valuation.calculated_at.isoformat(),
+        "method_note": "EPS multiplied by current PE; this is a mechanical scenario, not a forecast or fair-value guarantee.",
+    }
+    if analysis_mode == AI_MODE_HELD:
+        result.update(
+            {
+                "mechanical_price_vs_average_cost_twd": valuation.cost_difference,
+                "mechanical_price_vs_average_cost_percent": valuation.cost_difference_percent,
+            }
+        )
+    return result
+
+
+def _ai_analysis_result_response(row: StockAIAnalysis, cached: bool) -> StockAIAnalysisResultResponse:
     try:
         analysis_payload = json.loads(row.response_json)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=500, detail="Cached AI analysis is invalid.") from exc
-    return StockAIAnalysisResponse(
+    return StockAIAnalysisResultResponse(
+        mode=row.analysis_mode,
         provider=row.provider,
         model=row.model,
+        prompt_version=row.prompt_version,
         cached=cached,
         analysis_date=row.analysis_date,
         generated_at=row.updated_at,
-        analysis=normalize_ai_analysis(analysis_payload),
+        analysis=normalize_ai_analysis(analysis_payload, row.analysis_mode),
     )
 
 
@@ -653,7 +731,244 @@ def _ai_analysis_is_cacheable(row: StockAIAnalysis | None) -> bool:
         return False
     if "格式不是 JSON" in str(payload.get("summary") or ""):
         return False
+    try:
+        validation_errors = json.loads(getattr(row, "validation_errors_json", None) or "[]")
+    except json.JSONDecodeError:
+        return False
+    if any("warning:" not in str(error) for error in validation_errors):
+        return False
     return True
+
+
+def _ai_analysis_batch_response(
+    symbol: str,
+    results: dict[str, tuple[StockAIAnalysis, bool]],
+    errors: dict[str, str] | None = None,
+) -> StockAIAnalysisResponse:
+    return StockAIAnalysisResponse(
+        symbol=symbol,
+        analyses=StockAIAnalysisModesResponse(
+            unheld=(
+                _ai_analysis_result_response(*results[AI_MODE_UNHELD])
+                if AI_MODE_UNHELD in results
+                else None
+            ),
+            held=(
+                _ai_analysis_result_response(*results[AI_MODE_HELD])
+                if AI_MODE_HELD in results
+                else None
+            ),
+        ),
+        errors=errors or {},
+    )
+
+
+def _current_ai_cache_row(
+    session: Session,
+    stock: Stock,
+    provider,
+    analysis_mode: str,
+    stock_summary: dict,
+    analysis_date: date,
+) -> tuple[StockAIAnalysis | None, str]:
+    input_hash = stock_summary_hash(stock_summary)
+    row = session.scalar(
+        select(StockAIAnalysis)
+        .where(
+            StockAIAnalysis.stock_id == stock.id,
+            StockAIAnalysis.provider == provider.provider_id,
+            StockAIAnalysis.model == provider.model,
+            StockAIAnalysis.analysis_mode == analysis_mode,
+            StockAIAnalysis.prompt_version == PROMPT_VERSION,
+            StockAIAnalysis.analysis_date == analysis_date,
+            StockAIAnalysis.input_hash == input_hash,
+        )
+        .order_by(StockAIAnalysis.updated_at.desc())
+        .limit(1)
+    )
+    return row, input_hash
+
+
+def _latest_ai_cache_row(
+    session: Session,
+    stock: Stock,
+    provider_id: str,
+    model: str,
+    analysis_mode: str,
+) -> StockAIAnalysis | None:
+    candidates = session.scalars(
+        select(StockAIAnalysis)
+        .where(
+            StockAIAnalysis.stock_id == stock.id,
+            StockAIAnalysis.provider == provider_id,
+            StockAIAnalysis.model == model,
+            StockAIAnalysis.analysis_mode == analysis_mode,
+            StockAIAnalysis.prompt_version == PROMPT_VERSION,
+            StockAIAnalysis.status.in_(("success", "format_fallback")),
+        )
+        .order_by(StockAIAnalysis.updated_at.desc())
+        .limit(20)
+    ).all()
+    for row in candidates:
+        if _ai_analysis_is_cacheable(row):
+            return row
+        if _repair_ai_analysis_cache_row(session, row):
+            return row
+    return None
+
+
+def _repair_ai_analysis_cache_row(session: Session, row: StockAIAnalysis) -> bool:
+    if row.status != "format_fallback" or not row.raw_response_text:
+        return False
+    analysis, validation_errors = normalize_ai_analysis_with_errors(
+        row.raw_response_text,
+        row.analysis_mode,
+    )
+    if not analysis.format_valid:
+        return False
+    row.response_json = json.dumps(analysis.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+    row.validation_errors_json = json.dumps(validation_errors, ensure_ascii=False)
+    row.status = "success"
+    row.error_message = None
+    session.commit()
+    session.refresh(row)
+    return True
+
+
+def _repairable_current_ai_cache_row(
+    session: Session,
+    stock: Stock,
+    provider,
+    analysis_mode: str,
+    analysis_date: date,
+    input_hash: str,
+) -> StockAIAnalysis | None:
+    candidates = session.scalars(
+        select(StockAIAnalysis)
+        .where(
+            StockAIAnalysis.stock_id == stock.id,
+            StockAIAnalysis.provider == provider.provider_id,
+            StockAIAnalysis.model == provider.model,
+            StockAIAnalysis.analysis_mode == analysis_mode,
+            StockAIAnalysis.prompt_version == PROMPT_VERSION,
+            StockAIAnalysis.analysis_date == analysis_date,
+            StockAIAnalysis.input_hash == input_hash,
+            StockAIAnalysis.status == "format_fallback",
+        )
+        .order_by(StockAIAnalysis.updated_at.desc())
+        .limit(20)
+    ).all()
+    return next((candidate for candidate in candidates if _repair_ai_analysis_cache_row(session, candidate)), None)
+
+
+def _generate_ai_mode(
+    session: Session,
+    stock: Stock,
+    provider,
+    analysis_mode: str,
+    force_refresh: bool,
+) -> tuple[StockAIAnalysis | None, bool, str | None]:
+    stock_summary = _ai_stock_summary(stock, session, analysis_mode)
+    analysis_date = datetime.now(TAIPEI_TZ).date()
+    row, input_hash = _current_ai_cache_row(
+        session,
+        stock,
+        provider,
+        analysis_mode,
+        stock_summary,
+        analysis_date,
+    )
+    if row and _ai_analysis_is_cacheable(row) and not force_refresh:
+        return row, True, None
+    if not force_refresh:
+        repaired_row = _repairable_current_ai_cache_row(
+            session,
+            stock,
+            provider,
+            analysis_mode,
+            analysis_date,
+            input_hash,
+        )
+        if repaired_row is not None:
+            return repaired_row, True, None
+    row = None
+
+    request_payload_json = json.dumps(stock_summary, ensure_ascii=False, sort_keys=True)
+    if row is None:
+        row = StockAIAnalysis(
+            stock_id=stock.id,
+            provider=provider.provider_id,
+            model=provider.model,
+            analysis_mode=analysis_mode,
+            prompt_version=PROMPT_VERSION,
+            analysis_date=analysis_date,
+            input_hash=input_hash,
+            request_payload_json=request_payload_json,
+            response_json="{}",
+            status="queued",
+        )
+        session.add(row)
+
+    try:
+        provider_result = provider.analyze_stock(stock_summary, analysis_mode)
+    except AIAnalysisError as exc:
+        now = datetime.now(UTC)
+        row.request_payload_json = request_payload_json
+        row.response_json = "{}"
+        row.raw_response_text = None
+        row.provider_metadata_json = None
+        row.validation_errors_json = json.dumps([], ensure_ascii=False)
+        row.status = "failed"
+        row.error_message = str(exc)
+        row.updated_at = now
+        session.commit()
+        return None, False, str(exc)
+
+    now = datetime.now(UTC)
+    row.request_payload_json = request_payload_json
+    row.response_json = json.dumps(provider_result.analysis.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+    row.raw_response_text = provider_result.raw_response_text
+    row.provider_metadata_json = json.dumps(provider_result.provider_metadata, ensure_ascii=False, sort_keys=True)
+    row.validation_errors_json = json.dumps(provider_result.validation_errors, ensure_ascii=False)
+    row.status = "success" if provider_result.analysis.format_valid else "format_fallback"
+    row.error_message = None if provider_result.analysis.format_valid else "AI response failed validation."
+    row.updated_at = now
+    session.commit()
+    session.refresh(row)
+    if not provider_result.analysis.format_valid:
+        return None, False, "AI 回覆未通過格式或內容驗證，已保留 Log 供後續檢查。"
+    return row, False, None
+
+
+def _json_field(value: str | None):
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _ai_log_record(row: StockAIAnalysis, symbol: str) -> dict:
+    return {
+        "id": row.id,
+        "symbol": symbol,
+        "analysis_mode": row.analysis_mode,
+        "prompt_version": row.prompt_version,
+        "provider": row.provider,
+        "model": row.model,
+        "analysis_date": row.analysis_date.isoformat(),
+        "input_hash": row.input_hash,
+        "status": row.status,
+        "error_message": row.error_message,
+        "request_payload": _json_field(row.request_payload_json),
+        "normalized_response": _json_field(row.response_json),
+        "raw_response_text": row.raw_response_text,
+        "provider_metadata": _json_field(row.provider_metadata_json),
+        "validation_errors": _json_field(row.validation_errors_json) or [],
+        "created_at": row.created_at.isoformat(),
+        "updated_at": row.updated_at.isoformat(),
+    }
 
 
 def _as_taipei(value: datetime) -> datetime:
@@ -781,6 +1096,36 @@ def get_stock(symbol: str, session: Session = Depends(get_session)) -> StockResp
     return _stock_response(stock, session)
 
 
+@app.get("/api/stocks/{symbol}/ai-analysis/latest", response_model=StockAIAnalysisResponse)
+def get_latest_stock_ai_analysis(
+    symbol: str,
+    provider: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+) -> StockAIAnalysisResponse:
+    try:
+        normalized_symbol = normalize_symbol(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    stock = session.scalar(select(Stock).where(Stock.symbol == normalized_symbol, Stock.is_active.is_(True)))
+    if not stock:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    try:
+        provider_id, model = ai_provider_identity(settings, provider)
+    except AIConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    modes = [AI_MODE_UNHELD]
+    if session.scalar(select(StockPosition).where(StockPosition.stock_id == stock.id)):
+        modes.append(AI_MODE_HELD)
+    results = {
+        mode: (row, True)
+        for mode in modes
+        if (row := _latest_ai_cache_row(session, stock, provider_id, model, mode)) is not None
+    }
+    return _ai_analysis_batch_response(stock.symbol, results)
+
+
 @app.post("/api/stocks/{symbol}/ai-analysis", response_model=StockAIAnalysisResponse)
 def create_stock_ai_analysis(
     symbol: str,
@@ -795,80 +1140,115 @@ def create_stock_ai_analysis(
     stock = session.scalar(select(Stock).where(Stock.symbol == normalized_symbol, Stock.is_active.is_(True)))
     if not stock:
         raise HTTPException(status_code=404, detail="Stock not found")
-
     try:
-        provider = build_ai_provider(settings, payload.provider)
+        ai_provider = build_ai_provider(settings, payload.provider)
     except AIConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    stock_summary = _ai_stock_summary(stock, session)
-    input_hash = stock_summary_hash(stock_summary)
-    analysis_date = datetime.now(TAIPEI_TZ).date()
-    cached_analysis = session.scalar(
-        select(StockAIAnalysis)
-        .where(
-            StockAIAnalysis.stock_id == stock.id,
-            StockAIAnalysis.provider == provider.provider_id,
-            StockAIAnalysis.model == provider.model,
-            StockAIAnalysis.analysis_date == analysis_date,
-            StockAIAnalysis.input_hash == input_hash,
-            StockAIAnalysis.status == "success",
+    modes = [AI_MODE_UNHELD]
+    if session.scalar(select(StockPosition).where(StockPosition.stock_id == stock.id)):
+        modes.append(AI_MODE_HELD)
+
+    results: dict[str, tuple[StockAIAnalysis, bool]] = {}
+    errors: dict[str, str] = {}
+    for mode in modes:
+        row, cached, error = _generate_ai_mode(
+            session,
+            stock,
+            ai_provider,
+            mode,
+            payload.force_refresh,
         )
+        key = mode.lower()
+        if row is not None:
+            results[mode] = (row, cached)
+        elif error:
+            errors[key] = error
+
+    if not results:
+        details = "；".join(f"{mode}: {message}" for mode, message in errors.items())
+        raise HTTPException(status_code=502, detail=details or "AI analysis failed.")
+    return _ai_analysis_batch_response(stock.symbol, results, errors)
+
+
+@app.get("/api/ai-analysis/logs/export")
+def export_ai_analysis_logs(
+    format: str = Query(default="json", pattern="^(json|csv)$"),
+    symbol: str | None = Query(default=None),
+    mode: str | None = Query(default=None),
+    provider: str | None = Query(default=None),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=5000),
+    session: Session = Depends(get_session),
+):
+    query = (
+        select(StockAIAnalysis, Stock.symbol)
+        .join(Stock, Stock.id == StockAIAnalysis.stock_id)
         .order_by(StockAIAnalysis.updated_at.desc())
-        .limit(1)
+        .limit(limit)
     )
-    if not _ai_analysis_is_cacheable(cached_analysis):
-        cached_analysis = None
+    if symbol:
+        try:
+            query = query.where(Stock.symbol == normalize_symbol(symbol))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if mode:
+        normalized_mode = mode.strip().upper()
+        if normalized_mode not in {"GENERAL", AI_MODE_UNHELD, AI_MODE_HELD}:
+            raise HTTPException(status_code=400, detail="Unsupported analysis mode.")
+        query = query.where(StockAIAnalysis.analysis_mode == normalized_mode)
+    if provider:
+        query = query.where(StockAIAnalysis.provider == provider.strip().lower())
+    if date_from:
+        query = query.where(StockAIAnalysis.analysis_date >= date_from)
+    if date_to:
+        query = query.where(StockAIAnalysis.analysis_date <= date_to)
 
-    if cached_analysis and not payload.force_refresh:
-        return _ai_analysis_response(cached_analysis, cached=True)
-
-    request_payload_json = json.dumps(stock_summary, ensure_ascii=False, sort_keys=True)
-    row = cached_analysis or session.scalar(
-        select(StockAIAnalysis)
-        .where(
-            StockAIAnalysis.stock_id == stock.id,
-            StockAIAnalysis.provider == provider.provider_id,
-            StockAIAnalysis.model == provider.model,
-            StockAIAnalysis.analysis_date == analysis_date,
-            StockAIAnalysis.input_hash == input_hash,
+    records = [_ai_log_record(row, stock_symbol) for row, stock_symbol in session.execute(query).all()]
+    filename = f"ai-analysis-logs-{datetime.now(TAIPEI_TZ).date().isoformat()}"
+    if format == "json":
+        return JSONResponse(
+            content=jsonable_encoder(records),
+            headers={"Content-Disposition": f'attachment; filename="{filename}.json"'},
         )
-        .limit(1)
+
+    output = io.StringIO()
+    fieldnames = list(records[0].keys()) if records else [
+        "id",
+        "symbol",
+        "analysis_mode",
+        "prompt_version",
+        "provider",
+        "model",
+        "analysis_date",
+        "input_hash",
+        "status",
+        "error_message",
+        "request_payload",
+        "normalized_response",
+        "raw_response_text",
+        "provider_metadata",
+        "validation_errors",
+        "created_at",
+        "updated_at",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for record in records:
+        writer.writerow(
+            {
+                key: json.dumps(value, ensure_ascii=False, sort_keys=True)
+                if isinstance(value, (dict, list))
+                else value
+                for key, value in record.items()
+            }
+        )
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.csv"'},
     )
-    if row is None:
-        row = StockAIAnalysis(
-            stock_id=stock.id,
-            provider=provider.provider_id,
-            model=provider.model,
-            analysis_date=analysis_date,
-            input_hash=input_hash,
-            request_payload_json=request_payload_json,
-            response_json="{}",
-            status="queued",
-        )
-        session.add(row)
-
-    try:
-        analysis = provider.analyze_stock(stock_summary)
-    except AIAnalysisError as exc:
-        now = datetime.now(UTC)
-        row.request_payload_json = request_payload_json
-        row.response_json = "{}"
-        row.status = "failed"
-        row.error_message = str(exc)
-        row.updated_at = now
-        session.commit()
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    now = datetime.now(UTC)
-    row.request_payload_json = request_payload_json
-    row.response_json = json.dumps(analysis.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
-    row.status = "success"
-    row.error_message = None
-    row.updated_at = now
-    session.commit()
-    session.refresh(row)
-    return _ai_analysis_response(row, cached=False)
 
 
 @app.get("/api/stocks/{symbol}/technical-analysis", response_model=TechnicalAnalysisResponse)

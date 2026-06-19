@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class HealthResponse(BaseModel):
@@ -226,10 +226,23 @@ class StockAIAnalysisContent(BaseModel):
     format_valid: bool = True
 
 
-class StockAIAnalysisResponse(BaseModel):
+class StockAIAnalysisResultResponse(BaseModel):
+    mode: str
     provider: str
     model: str
+    prompt_version: str
     cached: bool
     analysis_date: date
     generated_at: datetime
     analysis: StockAIAnalysisContent
+
+
+class StockAIAnalysisModesResponse(BaseModel):
+    unheld: StockAIAnalysisResultResponse | None = None
+    held: StockAIAnalysisResultResponse | None = None
+
+
+class StockAIAnalysisResponse(BaseModel):
+    symbol: str
+    analyses: StockAIAnalysisModesResponse
+    errors: dict[str, str] = Field(default_factory=dict)

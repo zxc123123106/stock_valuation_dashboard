@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 import {
   DndContext,
@@ -41,6 +42,7 @@ import {
   Sparkles,
   Trash2,
   Wifi,
+  X,
 } from "lucide-react";
 import "./styles.css";
 
@@ -49,6 +51,7 @@ const POLL_SECONDS = 5;
 const BACKGROUND_REFRESH_SECONDS = 60;
 const MA_PERIODS = [5, 10, 20, 60, 120, 240];
 const MA_VISIBILITY_STORAGE_KEY = "stock-dashboard-visible-ma-lines";
+const AI_MODE_STORAGE_PREFIX = "stock-dashboard-ai-analysis-mode";
 const MA_LINE_COLORS = {
   5: "#f08f7f",
   10: "#e2c879",
@@ -949,7 +952,8 @@ const StockCard = React.forwardRef(function StockCard(
   const [fundamentalExpanded, setFundamentalExpanded] = useState(false);
   const [brokerTradingExpanded, setBrokerTradingExpanded] = useState(false);
   const [technicalExpanded, setTechnicalExpanded] = useState(false);
-  const [aiAnalysisExpanded, setAiAnalysisExpanded] = useState(false);
+  const [aiAnalysisOpen, setAiAnalysisOpen] = useState(false);
+  const aiButtonRef = useRef(null);
 
   return (
     <article
@@ -994,6 +998,18 @@ const StockCard = React.forwardRef(function StockCard(
           </div>
         </div>
         <div className="stock-actions">
+          <button
+            ref={aiButtonRef}
+            className="icon-button small ai-icon-button"
+            type="button"
+            onClick={() => setAiAnalysisOpen((current) => !current)}
+            title="AI 分析"
+            aria-label="AI 分析"
+            aria-expanded={aiAnalysisOpen}
+            disabled={overlay}
+          >
+            <span className="ai-icon-mark" aria-hidden="true" />
+          </button>
           <button
             className="icon-button small"
             type="button"
@@ -1155,12 +1171,13 @@ const StockCard = React.forwardRef(function StockCard(
           expanded={technicalExpanded}
           onToggle={() => setTechnicalExpanded((current) => !current)}
         />
-        <AIAnalysisDisclosure
-          symbol={stock.symbol}
-          expanded={aiAnalysisExpanded}
-          onToggle={() => setAiAnalysisExpanded((current) => !current)}
-        />
       </div>
+      <AIAnalysisPopover
+        stock={stock}
+        open={aiAnalysisOpen}
+        anchorRef={aiButtonRef}
+        onClose={() => setAiAnalysisOpen(false)}
+      />
     </article>
   );
 });
@@ -1460,21 +1477,150 @@ function TechnicalSummaryValue({ label, value, accent = false, digits = 2, suffi
   );
 }
 
-function AIAnalysisDisclosure({ symbol, expanded, onToggle }) {
+function loadAiMode(symbol, hasPosition) {
+  try {
+    const stored = window.localStorage.getItem(`${AI_MODE_STORAGE_PREFIX}:${symbol}`);
+    if (stored === "HELD" && hasPosition) {
+      return "HELD";
+    }
+    if (stored === "UNHELD") {
+      return "UNHELD";
+    }
+  } catch {
+    // Storage can be unavailable in private browsing contexts.
+  }
+  return hasPosition ? "HELD" : "UNHELD";
+}
+
+function AIAnalysisPopover({ stock, open, anchorRef, onClose }) {
+  const hasPosition = Boolean(stock.position);
+  const panelRef = useRef(null);
   const [analysisResponse, setAnalysisResponse] = useState(null);
+  const [activeMode, setActiveMode] = useState(() => loadAiMode(stock.symbol, hasPosition));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [panelStyle, setPanelStyle] = useState({});
 
-  async function generateAnalysis(forceRefresh = false) {
+  useEffect(() => {
+    setAnalysisResponse(null);
+    setError("");
+    setActiveMode(loadAiMode(stock.symbol, hasPosition));
+  }, [stock.symbol]);
+
+  useEffect(() => {
+    if (!hasPosition && activeMode === "HELD") {
+      setActiveMode("UNHELD");
+    }
+  }, [activeMode, hasPosition]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(`${AI_MODE_STORAGE_PREFIX}:${stock.symbol}`, activeMode);
+    } catch {
+      // The panel remains usable without persistent storage.
+    }
+  }, [activeMode, stock.symbol]);
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+    const controller = new AbortController();
+    async function loadLatest() {
+      setLoading(true);
+      setError("");
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/stocks/${stock.symbol}/ai-analysis/latest`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(await parseError(response));
+        }
+        setAnalysisResponse(await response.json());
+      } catch (requestError) {
+        if (requestError.name !== "AbortError") {
+          setError(requestError.message);
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      }
+    }
+    loadLatest();
+    return () => controller.abort();
+  }, [open, stock.symbol]);
+
+  useEffect(() => {
+    if (!open) {
+      return undefined;
+    }
+
+    function positionPanel() {
+      const anchor = anchorRef.current;
+      if (!anchor) {
+        return;
+      }
+      const rect = anchor.getBoundingClientRect();
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const mobile = viewportWidth <= 520;
+      const width = mobile ? viewportWidth - 20 : Math.min(520, viewportWidth - 24);
+      const left = mobile
+        ? 10
+        : Math.min(Math.max(12, rect.right - width), viewportWidth - width - 12);
+      let top = mobile ? 10 : rect.bottom + 8;
+      if (!mobile && viewportHeight - top < 360 && rect.top > 360) {
+        top = Math.max(12, rect.top - Math.min(620, viewportHeight - 24) - 8);
+      }
+      if (!mobile) {
+        top = Math.max(10, Math.min(top, viewportHeight - 180));
+      }
+      setPanelStyle({
+        left,
+        top,
+        width,
+        maxHeight: Math.max(160, viewportHeight - top - 10),
+      });
+    }
+
+    function handlePointerDown(event) {
+      if (panelRef.current?.contains(event.target) || anchorRef.current?.contains(event.target)) {
+        return;
+      }
+      onClose();
+    }
+
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    positionPanel();
+    window.addEventListener("resize", positionPanel);
+    window.addEventListener("scroll", positionPanel, true);
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("resize", positionPanel);
+      window.removeEventListener("scroll", positionPanel, true);
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [anchorRef, onClose, open]);
+
+  async function generateAnalysis() {
     setLoading(true);
     setError("");
     try {
-      const response = await fetch(`${API_BASE_URL}/api/stocks/${symbol}/ai-analysis`, {
+      const hasExistingAnalysis = Boolean(
+        analysisResponse?.analyses?.unheld || analysisResponse?.analyses?.held,
+      );
+      const response = await fetch(`${API_BASE_URL}/api/stocks/${stock.symbol}/ai-analysis`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ force_refresh: forceRefresh }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force_refresh: hasExistingAnalysis }),
       });
       if (!response.ok) {
         throw new Error(await parseError(response));
@@ -1487,64 +1633,108 @@ function AIAnalysisDisclosure({ symbol, expanded, onToggle }) {
     }
   }
 
-  const analysis = analysisResponse?.analysis;
+  if (!open) {
+    return null;
+  }
 
-  return (
-    <div className="ai-analysis">
-      <button className="ai-analysis-toggle" type="button" onClick={onToggle} aria-expanded={expanded}>
-        <span>
-          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-          AI 分析摘要
-        </span>
-        <small>{analysisResponse ? formatDate(analysisResponse.generated_at) : "手動產生"}</small>
-      </button>
-      {expanded && (
-        <div className="ai-analysis-panel">
-          <div className="ai-analysis-actions">
-            <button
-              className="text-button ai-analysis-button"
-              type="button"
-              onClick={() => generateAnalysis(Boolean(analysisResponse))}
-              disabled={loading}
-            >
-              {loading ? <Loader2 size={15} /> : <Sparkles size={15} />}
-              {analysisResponse ? "重新產生" : "產生 AI 分析"}
-            </button>
-          </div>
-          {error && (
-            <div className="ai-analysis-error">
-              <AlertCircle size={15} />
-              {error}
-            </div>
-          )}
-          {analysis ? (
-            <>
-              <div className="ai-status-row">
-                <span>狀態</span>
-                <strong>{analysis.overall_status}</strong>
-              </div>
-              <p>{analysis.summary}</p>
-              <div className="ai-analysis-lists">
-                <AIAnalysisList title="正面因素" items={analysis.positive_points} />
-                <AIAnalysisList title="風險因素" items={analysis.risk_points} />
-                <AIAnalysisList title="後續觀察" items={analysis.watch_points} />
-              </div>
-              <small>
-                {analysisResponse.provider} · {analysisResponse.model}
-                {analysisResponse.cached ? " · 使用今日快取" : " · 新產生"}
-                {" · "}
-                {formatDate(analysisResponse.generated_at)}
-              </small>
-              <small>{analysis.disclaimer}</small>
-            </>
-          ) : (
-            <div className="ai-analysis-empty">
-              只會傳送後端整理後的摘要指標，不傳完整 K 線、完整券商明細或帳戶資訊。
-            </div>
-          )}
+  const modeKey = activeMode === "HELD" ? "held" : "unheld";
+  const result = analysisResponse?.analyses?.[modeKey];
+  const analysis = result?.analysis;
+  const modeError = analysisResponse?.errors?.[modeKey];
+  const hasAnyAnalysis = Boolean(analysisResponse?.analyses?.unheld || analysisResponse?.analyses?.held);
+
+  return createPortal(
+    <section
+      ref={panelRef}
+      className="ai-analysis-popover"
+      style={panelStyle}
+      role="dialog"
+      aria-label={`${stock.symbol} AI 分析`}
+    >
+      <header className="ai-popover-header">
+        <div>
+          <span>AI 分析摘要</span>
+          <strong>{stock.symbol} {stock.name}</strong>
         </div>
-      )}
-    </div>
+        <button className="icon-button small" type="button" onClick={onClose} aria-label="關閉 AI 分析">
+          <X size={16} />
+        </button>
+      </header>
+      <div className="ai-mode-tabs" role="tablist" aria-label="AI 分析類別">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeMode === "UNHELD"}
+          className={activeMode === "UNHELD" ? "active" : ""}
+          onClick={() => setActiveMode("UNHELD")}
+        >
+          未持有
+        </button>
+        {hasPosition && (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeMode === "HELD"}
+            className={activeMode === "HELD" ? "active" : ""}
+            onClick={() => setActiveMode("HELD")}
+          >
+            持有中
+          </button>
+        )}
+      </div>
+      <div className="ai-analysis-panel">
+        <div className="ai-analysis-actions">
+          <button
+            className="text-button ai-analysis-button"
+            type="button"
+            onClick={generateAnalysis}
+            disabled={loading}
+          >
+            {loading ? <Loader2 className="spin" size={15} /> : <Sparkles size={15} />}
+            {hasAnyAnalysis ? "更新分析" : "產生分析"}
+          </button>
+        </div>
+        {(error || modeError) && (
+          <div className="ai-analysis-error">
+            <AlertCircle size={15} />
+            {modeError || error}
+          </div>
+        )}
+        {loading && !analysis ? (
+          <div className="ai-analysis-empty">
+            <Loader2 className="spin" size={15} />
+            AI 分析處理中
+          </div>
+        ) : analysis ? (
+          <>
+            <div className="ai-status-row">
+              <span>{activeMode === "HELD" ? "持有判斷" : "進場判斷"}</span>
+              <strong>{analysis.overall_status}</strong>
+            </div>
+            <p>{analysis.summary}</p>
+            <div className="ai-analysis-lists">
+              <AIAnalysisList title="正面因素" items={analysis.positive_points} />
+              <AIAnalysisList title="風險因素" items={analysis.risk_points} />
+              <AIAnalysisList title="後續觀察" items={analysis.watch_points} />
+            </div>
+            <small>
+              {result.provider} · {result.model}
+              {result.cached ? " · 使用快取" : " · 新產生"}
+              {" · "}
+              {formatDate(result.generated_at)}
+            </small>
+            <small>{analysis.disclaimer}</small>
+          </>
+        ) : (
+          <div className="ai-analysis-empty">
+            {activeMode === "HELD"
+              ? "持有分析只使用成交均價與每股／百分比損益，不傳股數、總成本或資產資料。"
+              : "未持有分析只使用行情、估值、基本面、技術面與籌碼摘要。"}
+          </div>
+        )}
+      </div>
+    </section>,
+    document.body,
   );
 }
 

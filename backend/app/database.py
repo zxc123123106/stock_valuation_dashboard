@@ -308,25 +308,20 @@ class StockRefreshState(Base):
 
 class StockAIAnalysis(Base):
     __tablename__ = "stock_ai_analyses"
-    __table_args__ = (
-        UniqueConstraint(
-            "stock_id",
-            "provider",
-            "model",
-            "analysis_date",
-            "input_hash",
-            name="uq_stock_ai_analysis_cache",
-        ),
-    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
     provider: Mapped[str] = mapped_column(String(24), index=True)
     model: Mapped[str] = mapped_column(String(120))
+    analysis_mode: Mapped[str] = mapped_column(String(16), default="GENERAL", index=True)
+    prompt_version: Mapped[str] = mapped_column(String(40), default="v1")
     analysis_date: Mapped[date] = mapped_column(Date, index=True)
     input_hash: Mapped[str] = mapped_column(String(64), index=True)
     request_payload_json: Mapped[str] = mapped_column(Text)
     response_json: Mapped[str] = mapped_column(Text)
+    raw_response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider_metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    validation_errors_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="success")
     error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
@@ -362,6 +357,7 @@ def init_database() -> None:
     ensure_stock_asset_type_column()
     ensure_stock_metric_quote_columns()
     ensure_analysis_cache_columns()
+    ensure_ai_analysis_log_columns()
     with SessionLocal() as session:
         backfill_display_order(session)
         remove_unsupported_eps(session)
@@ -458,6 +454,90 @@ def ensure_analysis_cache_columns() -> None:
                 "updated_at": "DATETIME",
             },
         )
+
+
+def ensure_ai_analysis_log_columns() -> None:
+    with engine.begin() as connection:
+        _ensure_table_columns(
+            connection,
+            "stock_ai_analyses",
+            {
+                "analysis_mode": "VARCHAR(16) NOT NULL DEFAULT 'GENERAL'",
+                "prompt_version": "VARCHAR(40) NOT NULL DEFAULT 'v1'",
+                "raw_response_text": "TEXT",
+                "provider_metadata_json": "TEXT",
+                "validation_errors_json": "TEXT",
+            },
+        )
+        connection.execute(
+            text("UPDATE stock_ai_analyses SET analysis_mode = 'GENERAL' WHERE analysis_mode IS NULL OR analysis_mode = ''")
+        )
+        connection.execute(
+            text("UPDATE stock_ai_analyses SET prompt_version = 'v1' WHERE prompt_version IS NULL OR prompt_version = ''")
+        )
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_stock_ai_analyses_analysis_mode ON stock_ai_analyses (analysis_mode)")
+        )
+        table_sql = connection.scalar(
+            text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'stock_ai_analyses'")
+        )
+        if table_sql and "uq_stock_ai_analysis_cache" in table_sql:
+            _remove_legacy_ai_analysis_unique_constraint(connection)
+
+
+def _remove_legacy_ai_analysis_unique_constraint(connection) -> None:
+    connection.execute(text("DROP TABLE IF EXISTS stock_ai_analyses_v2"))
+    connection.execute(
+        text(
+            """
+            CREATE TABLE stock_ai_analyses_v2 (
+                id INTEGER NOT NULL PRIMARY KEY,
+                stock_id INTEGER NOT NULL,
+                provider VARCHAR(24) NOT NULL,
+                model VARCHAR(120) NOT NULL,
+                analysis_mode VARCHAR(16) NOT NULL DEFAULT 'GENERAL',
+                prompt_version VARCHAR(40) NOT NULL DEFAULT 'v1',
+                analysis_date DATE NOT NULL,
+                input_hash VARCHAR(64) NOT NULL,
+                request_payload_json TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                raw_response_text TEXT,
+                provider_metadata_json TEXT,
+                validation_errors_json TEXT,
+                status VARCHAR(24) NOT NULL,
+                error_message VARCHAR(500),
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                FOREIGN KEY(stock_id) REFERENCES stocks (id)
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO stock_ai_analyses_v2 (
+                id, stock_id, provider, model, analysis_mode, prompt_version,
+                analysis_date, input_hash, request_payload_json, response_json,
+                raw_response_text, provider_metadata_json, validation_errors_json,
+                status, error_message, created_at, updated_at
+            )
+            SELECT
+                id, stock_id, provider, model, analysis_mode, prompt_version,
+                analysis_date, input_hash, request_payload_json, response_json,
+                raw_response_text, provider_metadata_json, validation_errors_json,
+                status, error_message, created_at, updated_at
+            FROM stock_ai_analyses
+            """
+        )
+    )
+    connection.execute(text("DROP TABLE stock_ai_analyses"))
+    connection.execute(text("ALTER TABLE stock_ai_analyses_v2 RENAME TO stock_ai_analyses"))
+    connection.execute(text("CREATE INDEX ix_stock_ai_analyses_stock_id ON stock_ai_analyses (stock_id)"))
+    connection.execute(text("CREATE INDEX ix_stock_ai_analyses_provider ON stock_ai_analyses (provider)"))
+    connection.execute(text("CREATE INDEX ix_stock_ai_analyses_analysis_mode ON stock_ai_analyses (analysis_mode)"))
+    connection.execute(text("CREATE INDEX ix_stock_ai_analyses_analysis_date ON stock_ai_analyses (analysis_date)"))
+    connection.execute(text("CREATE INDEX ix_stock_ai_analyses_input_hash ON stock_ai_analyses (input_hash)"))
 
 
 def _ensure_table_columns(connection, table_name: str, column_definitions: dict[str, str]) -> None:

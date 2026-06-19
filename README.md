@@ -199,7 +199,10 @@ curl http://127.0.0.1:8000/api/stocks
 - 股票卡片顯示目前PE、近三年平均PE與近三年PE區間。
 - 股票卡片的「基本面」預設收合，展開後顯示 EPS、月營收、毛利率、營益率與淨利率。
 - 每張卡片的「技術分析」預設收合，展開後顯示最近 120 個交易日的日 K、MA5/10/20/60/120/240、成交量摘要與十字線。
-- 每張卡片的「AI 分析摘要」需要手動按 `產生 AI 分析`。後端只會傳送整理後的摘要指標，不傳完整 K 線、完整券商分點明細、持有股數或帳戶資訊。同一標的同一天、同一 provider/model、同一份資料摘要會優先使用 SQLite 快取，避免重複消耗免費 API 額度。
+- 每張卡片右上角的 AI 圖示會開啟浮動分析面板。開啟面板只讀 SQLite 最新快取，不會呼叫外部 AI；按 `產生分析` 或 `更新分析` 才會消耗 API 額度。
+- `未持有` 分析固定產生進場評估，結論限制為 `分批布局 / 等待 / 避開 / 資料不足`。存在成交均價時會再產生獨立的 `持有中` 分析，結論限制為 `續抱 / 觀察 / 分批調節 / 重新評估`。
+- 未持有模式不傳成交均價或個人損益；持有中模式只傳成交均價與每股／百分比損益。兩種模式都不傳持股股數、總成本、持倉市值、資產規模或帳戶資訊。
+- AI 分析使用 `v2-dual-mode` prompt。OpenRouter 會先要求 strict structured output；若免費 provider 因參數支援標記而無法路由，會自動降級為 `json_object`，但仍須通過後端完整格式與隱私驗證。驗證失敗的結果只保存為檢查 Log，不會成為成功快取。
 - 按 `賣出` 會清除該檔標的目前買入價。
 - 可以拖曳卡片左側排序把手調整順序，也可以用卡片右上角的上移/下移箭頭微調。
 - 刪除標的是永久刪除，會移除該標的、持倉、股價快取、EPS、估值、主力進出與該標的更新紀錄。
@@ -217,7 +220,9 @@ curl http://127.0.0.1:8000/api/stocks
 - `GET /api/stocks/{symbol}`
 - `GET /api/stocks/{symbol}/technical-analysis?limit=120`
 - `GET /api/stocks/{symbol}/valuations`
+- `GET /api/stocks/{symbol}/ai-analysis/latest`
 - `POST /api/stocks/{symbol}/ai-analysis`
+- `GET /api/ai-analysis/logs/export?format=json|csv`
 - `GET /api/refresh/status`
 - `GET /api/settings/broker`
 - `PUT /api/settings/broker`
@@ -227,6 +232,8 @@ curl http://127.0.0.1:8000/api/stocks
 - `PUT /api/stocks/{symbol}/position`
 - `DELETE /api/stocks/{symbol}/position`
 - `DELETE /api/stocks/{symbol}`
+
+AI Log 匯出可使用 `symbol`、`mode`、`provider`、`date_from`、`date_to` 與 `limit` 篩選；預設最多 1000 筆，最高 5000 筆。匯出內容包含模式、prompt 版本、輸入摘要、正規化回覆、原始模型回覆、provider metadata 與驗證錯誤，不包含 API key。
 
 ## 連接埠被佔用
 
