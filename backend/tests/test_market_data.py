@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 
 from backend.app.market_data import (
+    StockProfileSnapshot,
     _fetch_twse_mis_quote,
     _parse_financial_quarters,
     _parse_finmind_eps,
     _parse_monthly_revenues,
     _parse_pe_history,
     derive_pe,
+    fetch_stock_quote,
     fetch_stock_pe,
     fetch_stock_profile,
 )
@@ -109,6 +112,97 @@ class TwseMisQuoteParserTest(unittest.TestCase):
         self.assertEqual(quote.day_low, Decimal("572.00"))
         self.assertEqual(quote.change_percent, Decimal("2.42"))
         self.assertEqual(quote.source, "TWSE MIS realtime quote")
+
+    def test_missing_last_trade_uses_best_bid_instead_of_open(self) -> None:
+        import backend.app.market_data as market_data
+
+        class FakeResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self):
+                return {
+                    "msgArray": [
+                        {
+                            "z": "-",
+                            "o": "109.45",
+                            "y": "107.30",
+                            "h": "111.15",
+                            "l": "109.45",
+                            "b": "110.95_110.90_110.85_",
+                            "a": "111.00_111.05_111.10_",
+                            "d": "20260622",
+                            "t": "11:45:04",
+                        }
+                    ]
+                }
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def get(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        original = market_data._build_session
+        market_data._build_session = lambda: FakeSession()
+        try:
+            quote = _fetch_twse_mis_quote("0050", "TWSE")
+        finally:
+            market_data._build_session = original
+
+        self.assertEqual(quote.current_price, Decimal("110.95"))
+        self.assertEqual(quote.open_price, Decimal("109.45"))
+        self.assertEqual(quote.source, "TWSE MIS best bid fallback")
+
+    def test_missing_trade_and_order_book_does_not_use_open_as_current_price(self) -> None:
+        import backend.app.market_data as market_data
+
+        class FakeResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self):
+                return {
+                    "msgArray": [
+                        {
+                            "z": "-",
+                            "o": "109.45",
+                            "y": "107.30",
+                            "b": "-",
+                            "a": "-",
+                        }
+                    ]
+                }
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def get(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        original = market_data._build_session
+        market_data._build_session = lambda: FakeSession()
+        try:
+            with self.assertRaisesRegex(ValueError, "has no current price"):
+                _fetch_twse_mis_quote("0050", "TWSE")
+        finally:
+            market_data._build_session = original
+
+    @patch("backend.app.market_data._fetch_finmind_latest_daily_quote")
+    @patch("backend.app.market_data._fetch_twse_mis_quote", side_effect=ValueError("MIS unavailable"))
+    @patch("backend.app.market_data._taiwan_market_is_open", return_value=True)
+    def test_market_hours_do_not_fallback_to_daily_close(
+        self,
+        _market_open,
+        _mis_quote,
+        daily_quote,
+    ) -> None:
+        profile = StockProfileSnapshot(symbol="0050", name="元大台灣50", asset_type="ETF", market="TWSE")
+
+        with self.assertRaisesRegex(ValueError, "MIS unavailable"):
+            fetch_stock_quote("0050", profile=profile)
+
+        daily_quote.assert_not_called()
 
 
 class FinMindFundamentalParserTest(unittest.TestCase):

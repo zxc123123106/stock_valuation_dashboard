@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time as clock_time, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
 
@@ -136,6 +136,9 @@ def fetch_stock_quote(
         return _fetch_twse_mis_quote(normalized_symbol, profile.market)
     except Exception as exc:
         failures.append(f"TWSE MIS quote failed: {exc}")
+
+    if _taiwan_market_is_open():
+        raise ValueError("; ".join(failures) or f"Could not fetch realtime quote for {normalized_symbol}.")
 
     try:
         return _fetch_finmind_latest_daily_quote(normalized_symbol, finmind_token)
@@ -373,8 +376,13 @@ def _fetch_twse_mis_quote(symbol: str, market: str) -> QuoteSnapshot:
         raise ValueError(f"TWSE MIS returned no quote for {symbol}.")
     row = rows[0]
     current_price = _optional_money(row.get("z"))
+    source = "TWSE MIS realtime quote"
     if current_price is None:
-        current_price = _optional_money(row.get("o")) or _optional_money(row.get("y"))
+        current_price = _first_order_price(row.get("b"))
+        source = "TWSE MIS best bid fallback"
+    if current_price is None:
+        current_price = _first_order_price(row.get("a"))
+        source = "TWSE MIS best ask fallback"
     if current_price is None:
         raise ValueError(f"TWSE MIS quote for {symbol} has no current price.")
 
@@ -388,7 +396,7 @@ def _fetch_twse_mis_quote(symbol: str, market: str) -> QuoteSnapshot:
         current_price=current_price,
         change_percent=_quote_change_percent(current_price, open_price),
         price_updated_at=_parse_twse_mis_datetime(row.get("d"), row.get("t")),
-        source="TWSE MIS realtime quote",
+        source=source,
     )
 
 
@@ -713,6 +721,20 @@ def _quote_change_percent(current_price: Decimal, open_price: Decimal | None) ->
     if open_price is None or open_price == 0:
         return None
     return ((current_price - open_price) / open_price * Decimal("100")).quantize(MONEY, rounding=ROUND_HALF_UP)
+
+
+def _first_order_price(value) -> Decimal | None:
+    for item in str(value or "").split("_"):
+        price = _optional_money(item)
+        if price is not None:
+            return price
+    return None
+
+
+def _taiwan_market_is_open(now: datetime | None = None) -> bool:
+    local_now = now or datetime.now(TAIPEI_TZ)
+    local_time = local_now.astimezone(TAIPEI_TZ).time().replace(tzinfo=None)
+    return local_now.weekday() < 5 and clock_time(9, 0) <= local_time < clock_time(14, 0)
 
 
 def _previous_close_from_change(current_price: Decimal, change_price: Decimal | None) -> Decimal | None:
