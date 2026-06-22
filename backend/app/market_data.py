@@ -338,15 +338,15 @@ def _fetch_finmind_realtime_quote(symbol: str, token: str) -> QuoteSnapshot:
     if not rows:
         raise ValueError(f"FinMind returned no realtime quote for {symbol}.")
     row = rows[0]
-    current_price = _money(row.get("close"))
-    open_price = _optional_money(row.get("open"))
+    current_price = _positive_market_price(row.get("close"), f"FinMind realtime quote for {symbol}")
+    open_price = _optional_positive_market_price(row.get("open"))
     previous_close = _previous_close_from_change(current_price, _optional_money(row.get("change_price")))
     return QuoteSnapshot(
         symbol=symbol,
         open_price=open_price,
         previous_close=previous_close,
-        day_high=_optional_money(row.get("high")),
-        day_low=_optional_money(row.get("low")),
+        day_high=_optional_positive_market_price(row.get("high")),
+        day_low=_optional_positive_market_price(row.get("low")),
         current_price=current_price,
         change_percent=_quote_change_percent(current_price, open_price),
         price_updated_at=_parse_datetime(row.get("date")),
@@ -375,7 +375,7 @@ def _fetch_twse_mis_quote(symbol: str, market: str) -> QuoteSnapshot:
     if not rows:
         raise ValueError(f"TWSE MIS returned no quote for {symbol}.")
     row = rows[0]
-    current_price = _optional_money(row.get("z"))
+    current_price = _optional_positive_market_price(row.get("z"))
     source = "TWSE MIS realtime quote"
     if current_price is None:
         current_price = _first_order_price(row.get("b"))
@@ -386,13 +386,13 @@ def _fetch_twse_mis_quote(symbol: str, market: str) -> QuoteSnapshot:
     if current_price is None:
         raise ValueError(f"TWSE MIS quote for {symbol} has no current price.")
 
-    open_price = _optional_money(row.get("o"))
+    open_price = _optional_positive_market_price(row.get("o"))
     return QuoteSnapshot(
         symbol=symbol,
         open_price=open_price,
-        previous_close=_optional_money(row.get("y")),
-        day_high=_optional_money(row.get("h")),
-        day_low=_optional_money(row.get("l")),
+        previous_close=_optional_positive_market_price(row.get("y")),
+        day_high=_optional_positive_market_price(row.get("h")),
+        day_low=_optional_positive_market_price(row.get("l")),
         current_price=current_price,
         change_percent=_quote_change_percent(current_price, open_price),
         price_updated_at=_parse_twse_mis_datetime(row.get("d"), row.get("t")),
@@ -418,14 +418,14 @@ def _fetch_finmind_latest_daily_quote(symbol: str, token: str | None) -> QuoteSn
     sorted_rows = sorted(rows, key=lambda item: str(item.get("date") or ""))
     latest = sorted_rows[-1]
     previous = sorted_rows[-2] if len(sorted_rows) >= 2 else None
-    current_price = _money(latest.get("close"))
-    open_price = _optional_money(latest.get("open"))
+    current_price = _positive_market_price(latest.get("close"), f"FinMind daily quote for {symbol}")
+    open_price = _optional_positive_market_price(latest.get("open"))
     return QuoteSnapshot(
         symbol=symbol,
         open_price=open_price,
-        previous_close=_optional_money(previous.get("close")) if previous else None,
-        day_high=_optional_money(latest.get("max")),
-        day_low=_optional_money(latest.get("min")),
+        previous_close=_optional_positive_market_price(previous.get("close")) if previous else None,
+        day_high=_optional_positive_market_price(latest.get("max")),
+        day_low=_optional_positive_market_price(latest.get("min")),
         current_price=current_price,
         change_percent=_quote_change_percent(current_price, open_price),
         price_updated_at=_date_to_close_time(latest.get("date")),
@@ -725,10 +725,22 @@ def _quote_change_percent(current_price: Decimal, open_price: Decimal | None) ->
 
 def _first_order_price(value) -> Decimal | None:
     for item in str(value or "").split("_"):
-        price = _optional_money(item)
+        price = _optional_positive_market_price(item)
         if price is not None:
             return price
     return None
+
+
+def _optional_positive_market_price(value) -> Decimal | None:
+    price = _optional_money(value)
+    return price if price is not None and price > 0 else None
+
+
+def _positive_market_price(value, context: str) -> Decimal:
+    price = _optional_positive_market_price(value)
+    if price is None:
+        raise ValueError(f"{context} has no positive current price.")
+    return price
 
 
 def _taiwan_market_is_open(now: datetime | None = None) -> bool:
