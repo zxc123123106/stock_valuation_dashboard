@@ -77,10 +77,11 @@ const REFRESH_STATUS_LABELS = {
 };
 
 const MARKET_SESSION_LABELS = {
+  always_on: "24 小時更新中",
   open: "盤中更新中",
-  pre_open: "開盤外停止",
-  post_close: "開盤外停止",
-  weekend: "週末停止",
+  pre_open: "24 小時更新中",
+  post_close: "24 小時更新中",
+  weekend: "24 小時更新中",
 };
 
 function formatNumber(value, digits = 2) {
@@ -696,9 +697,9 @@ function App() {
 
   const activeStock = orderedStocks.find((stock) => stock.symbol === activeDragSymbol);
   const latestDataTime = latestMetricTime(stocks);
-  const valuationCount = stocks.reduce((total, stock) => total + stock.valuations.length, 0);
-  const refreshWindow = refreshStatus.refresh_window || metadata?.refresh_window || "平日 09:00-14:00 Asia/Taipei";
-  const marketSessionLabel = MARKET_SESSION_LABELS[refreshStatus.market_session] || "開盤外停止";
+  const latestOfficialDataDate = metadata?.latest_official_data_date;
+  const refreshWindow = refreshStatus.refresh_window || metadata?.refresh_window || "24 小時不間斷 Asia/Taipei";
+  const marketSessionLabel = MARKET_SESSION_LABELS[refreshStatus.market_session] || "24 小時更新中";
   const lastCloseVerification = refreshStatus.last_close_verification_at || metadata?.last_close_verification_at;
   const currentRefreshText = refreshStatus.current_symbol
     ? refreshStatus.current_symbol
@@ -733,7 +734,7 @@ function App() {
         <div className="metric">
           <span>自動更新</span>
           <strong>{marketSessionLabel}</strong>
-          <small>股價每 {metadata?.refresh_interval_seconds || BACKGROUND_REFRESH_SECONDS} 秒 · PE/EPS 每日 09:00 · 下次 {formatCountdown(refreshStatus.next_auto_refresh_at, now)}</small>
+          <small>每 {metadata?.refresh_interval_seconds || BACKGROUND_REFRESH_SECONDS} 秒更新 · PE/EPS 每日一次 · 下次 {formatCountdown(refreshStatus.next_auto_refresh_at, now)}</small>
         </div>
         <div className="metric">
           <span>目前更新</span>
@@ -742,8 +743,8 @@ function App() {
         </div>
         <div className="metric">
           <span>最近資料</span>
-          <strong>{formatDate(latestDataTime)}</strong>
-          <small>{stocks.length} 檔標的 · {valuationCount} 筆估值 · 收盤補抓 {formatDate(lastCloseVerification)}</small>
+          <strong>{latestOfficialDataDate ? formatTradingDate(latestOfficialDataDate) : formatDate(latestDataTime)}</strong>
+          <small>TWSE / FinMind 資料 · {stocks.length} 檔標的 · 18:00 全量補抓 {formatDate(lastCloseVerification)}</small>
         </div>
       </section>
 

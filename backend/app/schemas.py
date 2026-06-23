@@ -25,6 +25,7 @@ class MetadataResponse(BaseModel):
     next_auto_refresh_at: datetime | None = None
     last_refresh_finished_at: datetime | None = None
     last_close_verification_at: datetime | None = None
+    latest_official_data_date: date | None = None
 
 
 class StockMetricResponse(BaseModel):
@@ -41,6 +42,7 @@ class StockMetricResponse(BaseModel):
     pe_vs_average_percent: float | None = None
     price_updated_at: datetime
     pe_updated_at: datetime
+    pe_data_date: date | None = None
     source: str
 
 
@@ -193,8 +195,8 @@ class RefreshStatusResponse(BaseModel):
     status: str
     current_symbol: str | None = None
     queue_length: int
-    auto_refresh_enabled: bool = False
-    market_session: str = "closed"
+    auto_refresh_enabled: bool = True
+    market_session: str = "always_on"
     refresh_window: str = ""
     next_auto_refresh_at: datetime | None = None
     last_refresh_finished_at: datetime | None = None

@@ -171,17 +171,18 @@ curl http://127.0.0.1:8000/api/stocks
 
 前端每 5 秒讀取 SQLite 快取，不會等待外部 API，因此頁面不會因資料同步而整頁卡住。
 
-後端自動更新只在台北時間平日 `09:00` 到 `14:00` 執行。
+後端自動更新 24 小時不間斷執行，不再限制台股開盤時段。
 
 - 股票與 ETF 股價每 `BACKGROUND_REFRESH_SECONDS` 更新一次，預設為 `60` 秒；資料來源依序為 FinMind sponsor 即時快照、TWSE MIS、FinMind `TaiwanStockPrice` 最近收盤。TWSE MIS 最新成交價缺漏時使用最佳買價、再使用最佳賣價，並跳過漲跌停委託簿中的 `0` 哨兵值；絕不以開盤價代替現價。盤中即時來源全部失敗時保留既有快取，不用日線收盤覆蓋。
+- 新增標的時優先使用 FinMind `TaiwanStockInfo` 辨識名稱與市場；若 FinMind 無法使用，後端會改查 TWSE MIS 的上市與上櫃頻道，自動辨識 `TWSE / TPEX`，避免上櫃標的被錯誤送往上市行情端點。
 - 主力進出每日更新一次，股票與 ETF 都會抓取。
 - 日線使用 FinMind `TaiwanStockPrice` 每日更新一次，股票與 ETF 都會保存最近約 600 個日曆日的歷史資料；盤中另以現價快取補上當日暫定 K 棒。
-- 目前PE優先使用 TWSE OpenAPI；TWSE 無資料時 fallback 到 FinMind `TaiwanStockPER` 最新 PER。
+- 目前PE會比較 TWSE OpenAPI 與 FinMind `TaiwanStockPER` 的實際交易日期，採用日期較新的資料；同一交易日才優先使用 TWSE。
 - 近三年平均PE與PE區間使用 FinMind `TaiwanStockPER`。
-- EPS 與季度基本面使用 FinMind `TaiwanStockFinancialStatements`，月營收使用 FinMind `TaiwanStockMonthRevenue`，並在台北時間每日 `09:00` 後第一輪自動更新一次，只適用股票。
+- EPS 與季度基本面使用 FinMind `TaiwanStockFinancialStatements`，月營收使用 FinMind `TaiwanStockMonthRevenue`，每日第一次自動更新會刷新一次，只適用股票。
 - ETF 顯示股價、買入價、每股未實現損益與主力進出；不顯示目前PE、EPS、基本面或估值列。
-- `14:00` 後，後端會在每個平日做一次收盤補抓，確認最後一筆快取。
-- 週末不會自動更新。
+- 每個平日 `18:00` 後，後端會做一次強制全量盤後補抓，讓 TWSE／FinMind 有時間發布當日收盤資料；看板「最近資料」顯示兩者快取中的最新官方交易日。
+- 週末也會維持背景更新；若資料源沒有新資料，系統會保留既有快取。
 - 手動更新任何時間都可以使用。
 - 看板右上角的更新按鈕會排入全部標的的全量更新，會重新抓股價、PE、EPS 與主力進出；個股卡片右上角的更新按鈕則維持該檔標的的一般背景更新。
 - 更新失敗時會保留既有快取，並使用 1、3、5、15 分鐘的 backoff 節奏等待自動重試；手動更新會跳過等待時間。

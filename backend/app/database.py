@@ -104,6 +104,7 @@ class StockMetric(Base):
     pe_vs_average_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
     price_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     pe_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    pe_data_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     source: Mapped[str] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
@@ -364,6 +365,8 @@ def init_database() -> None:
         remove_legacy_histock_eps(session)
         seed_demo_data(session)
         seed_app_settings(session)
+        backfill_latest_metric_pe_from_history(session)
+        session.commit()
     run_startup_maintenance()
 
 
@@ -412,6 +415,8 @@ def ensure_stock_metric_quote_columns() -> None:
             connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN pe_max_3y NUMERIC(12, 2)"))
         if "pe_vs_average_percent" not in columns:
             connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN pe_vs_average_percent NUMERIC(8, 2)"))
+        if "pe_data_date" not in columns:
+            connection.execute(text("ALTER TABLE stock_metrics ADD COLUMN pe_data_date DATE"))
 
 
 def ensure_analysis_cache_columns() -> None:
@@ -828,6 +833,7 @@ def apply_layered_stock_refresh(
     eps_updated_at: datetime | None,
     source: str,
     calculated_at: datetime,
+    pe_data_date: date | None = None,
 ) -> Stock:
     now = datetime.now(UTC)
     stock = session.scalar(select(Stock).where(Stock.symbol == profile.symbol))
@@ -861,9 +867,12 @@ def apply_layered_stock_refresh(
     )
     metric_pe = _positive_pe(current_pe)
     metric_pe_updated_at = pe_updated_at
-    if metric_pe is None and latest_metric:
+    metric_pe_data_date = pe_data_date
+    pe_snapshot_received = pe_updated_at is not None or pe_data_date is not None
+    if not pe_snapshot_received and latest_metric:
         metric_pe = _positive_pe(latest_metric.current_pe)
         metric_pe_updated_at = latest_metric.pe_updated_at
+        metric_pe_data_date = latest_metric.pe_data_date
     stored_metric_pe = metric_pe or Decimal("0.00")
     if metric_pe_updated_at is None:
         metric_pe_updated_at = quote.price_updated_at
@@ -884,6 +893,7 @@ def apply_layered_stock_refresh(
             pe_vs_average_percent=_pe_vs_average_percent(metric_pe, latest_metric.pe_average_3y if latest_metric else None),
             price_updated_at=quote.price_updated_at,
             pe_updated_at=metric_pe_updated_at,
+            pe_data_date=metric_pe_data_date,
             source=source,
         )
     )
@@ -1126,6 +1136,20 @@ def _update_latest_metric_pe_summary(session: Session, stock: Stock) -> None:
     if not latest_metric:
         return
 
+    latest_history = session.scalar(
+        select(StockPEHistory)
+        .where(StockPEHistory.stock_id == stock.id)
+        .order_by(StockPEHistory.trade_date.desc())
+        .limit(1)
+    )
+    if latest_history and (
+        latest_metric.pe_data_date is None
+        or latest_history.trade_date > latest_metric.pe_data_date
+    ):
+        latest_metric.current_pe = _positive_pe(latest_history.per) or Decimal("0.00")
+        latest_metric.pe_data_date = latest_history.trade_date
+        latest_metric.pe_updated_at = latest_history.fetched_at
+
     pe_values = [
         value
         for value in session.scalars(
@@ -1148,6 +1172,12 @@ def _update_latest_metric_pe_summary(session: Session, stock: Stock) -> None:
     latest_metric.pe_min_3y = min(pe_values)
     latest_metric.pe_max_3y = max(pe_values)
     latest_metric.pe_vs_average_percent = _pe_vs_average_percent(latest_metric.current_pe, pe_average)
+
+
+def backfill_latest_metric_pe_from_history(session: Session) -> None:
+    stocks = session.scalars(select(Stock)).all()
+    for stock in stocks:
+        _update_latest_metric_pe_summary(session, stock)
 
 
 def _pe_vs_average_percent(current_pe: Decimal | None, average_pe: Decimal | None) -> Decimal | None:

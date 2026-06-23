@@ -14,6 +14,7 @@ from backend.app.market_data import (
     derive_pe,
     fetch_stock_quote,
     fetch_stock_pe,
+    fetch_stock_pe_snapshot,
     fetch_stock_profile,
 )
 
@@ -67,6 +68,48 @@ class StockProfileTest(unittest.TestCase):
         self.assertEqual(profile.name, "元大台灣50")
         self.assertEqual(profile.asset_type, "ETF")
         self.assertEqual(profile.market, "TWSE")
+
+    def test_fetch_profile_discovers_tpex_market_when_finmind_is_unavailable(self) -> None:
+        import backend.app.market_data as market_data
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self):
+                return self.payload
+
+        class FakeSession:
+            headers: dict[str, str] = {}
+
+            def get(self, *_args, **kwargs):
+                params = kwargs.get("params") or {}
+                channel = params.get("ex_ch")
+                if channel == "otc_8064.tw":
+                    return FakeResponse({"msgArray": [{"c": "8064", "n": "東捷", "ex": "otc"}]})
+                if channel == "tse_8064.tw":
+                    return FakeResponse({"msgArray": [{"c": ""}]})
+                return FakeResponse({})
+
+        original_info = market_data._fetch_finmind_stock_info
+        original_session = market_data._build_session
+        market_data._PROFILE_CACHE.pop("8064", None)
+        market_data._fetch_finmind_stock_info = lambda _token: (_ for _ in ()).throw(ValueError("402"))
+        market_data._build_session = lambda: FakeSession()
+        try:
+            profile = fetch_stock_profile("8064")
+        finally:
+            market_data._fetch_finmind_stock_info = original_info
+            market_data._build_session = original_session
+            market_data._PROFILE_CACHE.pop("8064", None)
+
+        self.assertEqual(profile.symbol, "8064")
+        self.assertEqual(profile.name, "東捷")
+        self.assertEqual(profile.asset_type, "STOCK")
+        self.assertEqual(profile.market, "TPEX")
 
 
 class TwseMisQuoteParserTest(unittest.TestCase):
@@ -233,6 +276,47 @@ class FinMindFundamentalParserTest(unittest.TestCase):
             market_data._fetch_finmind_data = original_fetch_finmind_data
 
         self.assertEqual(current_pe, Decimal("21.50"))
+
+    def test_fetch_stock_pe_uses_newer_finmind_trade_date(self) -> None:
+        import backend.app.market_data as market_data
+
+        original_get_json = market_data._get_json
+        original_fetch_finmind_data = market_data._fetch_finmind_data
+        market_data._get_json = lambda *_args, **_kwargs: [
+            {"Date": "1150618", "Code": "4958", "PEratio": "90.55"},
+        ]
+        market_data._fetch_finmind_data = lambda *_args, **_kwargs: [
+            {"date": "2026-06-19", "stock_id": "4958", "PER": 90.55},
+            {"date": "2026-06-22", "stock_id": "4958", "PER": 87.73},
+        ]
+        try:
+            snapshot = fetch_stock_pe_snapshot("4958")
+        finally:
+            market_data._get_json = original_get_json
+            market_data._fetch_finmind_data = original_fetch_finmind_data
+
+        self.assertEqual(snapshot.current_pe, Decimal("87.73"))
+        self.assertEqual(snapshot.trade_date.isoformat(), "2026-06-22")
+        self.assertEqual(snapshot.source, "FinMind TaiwanStockPER")
+
+    def test_fetch_stock_pe_keeps_twse_when_finmind_is_unavailable(self) -> None:
+        import backend.app.market_data as market_data
+
+        original_get_json = market_data._get_json
+        original_fetch_finmind_data = market_data._fetch_finmind_data
+        market_data._get_json = lambda *_args, **_kwargs: [
+            {"Date": "1150622", "Code": "4958", "PEratio": "87.73"},
+        ]
+        market_data._fetch_finmind_data = lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("403"))
+        try:
+            snapshot = fetch_stock_pe_snapshot("4958")
+        finally:
+            market_data._get_json = original_get_json
+            market_data._fetch_finmind_data = original_fetch_finmind_data
+
+        self.assertEqual(snapshot.current_pe, Decimal("87.73"))
+        self.assertEqual(snapshot.trade_date.isoformat(), "2026-06-22")
+        self.assertEqual(snapshot.source, "TWSE OpenAPI BWIBBU_ALL")
 
     def test_fetch_stock_pe_treats_zero_twse_pe_as_not_applicable(self) -> None:
         import backend.app.market_data as market_data

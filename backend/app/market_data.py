@@ -36,6 +36,9 @@ class StockProfileSnapshot:
     currency: str = "TWD"
 
 
+_PROFILE_CACHE: dict[str, tuple[datetime, StockProfileSnapshot]] = {}
+
+
 @dataclass(frozen=True)
 class QuoteSnapshot:
     symbol: str
@@ -70,6 +73,13 @@ class PEHistorySnapshot:
 
 
 @dataclass(frozen=True)
+class CurrentPESnapshot:
+    current_pe: Decimal | None
+    trade_date: date | None
+    source: str
+
+
+@dataclass(frozen=True)
 class FinancialQuarterSnapshot:
     quarter_date: date
     eps: Decimal
@@ -101,19 +111,40 @@ def normalize_symbol(symbol: str) -> str:
 
 def fetch_stock_profile(symbol: str, *, finmind_token: str | None = None) -> StockProfileSnapshot:
     normalized_symbol = normalize_symbol(symbol)
-    rows = _fetch_finmind_stock_info(finmind_token)
-    row = next((item for item in rows if str(item.get("stock_id")) == normalized_symbol), None)
-    if not row:
-        raise ValueError(f"Could not find stock profile for {normalized_symbol} from FinMind TaiwanStockInfo.")
+    now = datetime.now(UTC)
+    cached = _PROFILE_CACHE.get(normalized_symbol)
+    if cached and (now - cached[0]).total_seconds() < STOCK_INFO_CACHE_SECONDS:
+        return cached[1]
 
-    market = _map_finmind_market(row.get("type"))
-    industry = str(row.get("industry_category") or "").upper()
-    return StockProfileSnapshot(
-        symbol=normalized_symbol,
-        name=str(row.get("stock_name") or normalized_symbol),
-        asset_type="ETF" if industry == "ETF" else "STOCK",
-        market=market,
-    )
+    finmind_error: Exception | None = None
+    try:
+        rows = _fetch_finmind_stock_info(finmind_token)
+        row = next((item for item in rows if str(item.get("stock_id")) == normalized_symbol), None)
+    except Exception as exc:
+        finmind_error = exc
+        row = None
+
+    if row:
+        market = _map_finmind_market(row.get("type"))
+        industry = str(row.get("industry_category") or "").upper()
+        profile = StockProfileSnapshot(
+            symbol=normalized_symbol,
+            name=str(row.get("stock_name") or normalized_symbol),
+            asset_type="ETF" if industry == "ETF" else "STOCK",
+            market=market,
+        )
+    else:
+        try:
+            profile = _fetch_twse_mis_profile(normalized_symbol)
+        except Exception as mis_error:
+            details = []
+            if finmind_error:
+                details.append(f"FinMind TaiwanStockInfo failed: {finmind_error}")
+            details.append(f"TWSE MIS profile discovery failed: {mis_error}")
+            raise ValueError("; ".join(details)) from mis_error
+
+    _PROFILE_CACHE[normalized_symbol] = (now, profile)
+    return profile
 
 
 def fetch_stock_quote(
@@ -154,22 +185,71 @@ def fetch_stock_pe(
     finmind_token: str | None = None,
     end_date: date | None = None,
 ) -> Decimal | None:
-    normalized_symbol = normalize_symbol(symbol)
-    session = _build_session()
-    rows = _get_json(session, f"{TWSE_OPENAPI_BASE_URL}/exchangeReport/BWIBBU_ALL")
-    row = next((item for item in rows if isinstance(item, dict) and item.get("Code") == normalized_symbol), None)
-    twse_pe = _positive_pe(_optional_money(row.get("PEratio"))) if row else None
-    if twse_pe is not None:
-        return twse_pe
-
-    history = fetch_pe_history(
-        normalized_symbol,
+    return fetch_stock_pe_snapshot(
+        symbol,
         finmind_token=finmind_token,
         end_date=end_date,
-        days=14,
+    ).current_pe
+
+
+def fetch_stock_pe_snapshot(
+    symbol: str,
+    *,
+    finmind_token: str | None = None,
+    end_date: date | None = None,
+) -> CurrentPESnapshot:
+    normalized_symbol = normalize_symbol(symbol)
+    session = _build_session()
+    twse_snapshot: CurrentPESnapshot | None = None
+    finmind_snapshot: CurrentPESnapshot | None = None
+    failures: list[str] = []
+
+    try:
+        rows = _get_json(session, f"{TWSE_OPENAPI_BASE_URL}/exchangeReport/BWIBBU_ALL")
+        row = next(
+            (item for item in rows if isinstance(item, dict) and item.get("Code") == normalized_symbol),
+            None,
+        )
+        if row:
+            twse_snapshot = CurrentPESnapshot(
+                current_pe=_positive_pe(_optional_money(row.get("PEratio"))),
+                trade_date=_parse_twse_report_date(row.get("Date")),
+                source="TWSE OpenAPI BWIBBU_ALL",
+            )
+    except Exception as exc:
+        failures.append(f"TWSE OpenAPI PE failed: {exc}")
+
+    try:
+        history = fetch_pe_history(
+            normalized_symbol,
+            finmind_token=finmind_token,
+            end_date=end_date,
+            days=14,
+        )
+    except Exception as exc:
+        failures.append(f"FinMind TaiwanStockPER failed: {exc}")
+    else:
+        if history:
+            latest = history[-1]
+            finmind_snapshot = CurrentPESnapshot(
+                current_pe=latest.per,
+                trade_date=latest.trade_date,
+                source="FinMind TaiwanStockPER",
+            )
+
+    candidates = [snapshot for snapshot in (twse_snapshot, finmind_snapshot) if snapshot is not None]
+    if not candidates:
+        if failures:
+            raise ValueError("; ".join(failures))
+        return CurrentPESnapshot(current_pe=None, trade_date=None, source="PE unavailable")
+
+    return max(
+        candidates,
+        key=lambda snapshot: (
+            snapshot.trade_date or date.min,
+            snapshot.source.startswith("TWSE"),
+        ),
     )
-    latest = next((snapshot.per for snapshot in reversed(history) if snapshot.per is not None), None)
-    return latest
 
 
 def fetch_pe_history(
@@ -358,23 +438,9 @@ def _fetch_twse_mis_quote(symbol: str, market: str) -> QuoteSnapshot:
     session = _build_session()
     session.get(f"{TWSE_MIS_BASE_URL}/index.jsp", timeout=20)
     exchange_code = "otc" if market.upper() == "TPEX" else "tse"
-    response = session.get(
-        f"{TWSE_MIS_BASE_URL}/api/getStockInfo.jsp",
-        params={
-            "ex_ch": f"{exchange_code}_{symbol}.tw",
-            "json": "1",
-            "delay": "0",
-            "_": str(int(time.time() * 1000)),
-        },
-        headers={"Referer": f"{TWSE_MIS_BASE_URL}/fibest.jsp?stock={symbol}"},
-        timeout=20,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    rows = payload.get("msgArray") or []
-    if not rows:
+    row = _request_twse_mis_row(session, symbol, exchange_code)
+    if not row:
         raise ValueError(f"TWSE MIS returned no quote for {symbol}.")
-    row = rows[0]
     current_price = _optional_positive_market_price(row.get("z"))
     source = "TWSE MIS realtime quote"
     if current_price is None:
@@ -398,6 +464,43 @@ def _fetch_twse_mis_quote(symbol: str, market: str) -> QuoteSnapshot:
         price_updated_at=_parse_twse_mis_datetime(row.get("d"), row.get("t")),
         source=source,
     )
+
+
+def _fetch_twse_mis_profile(symbol: str) -> StockProfileSnapshot:
+    session = _build_session()
+    session.get(f"{TWSE_MIS_BASE_URL}/index.jsp", timeout=20)
+    for exchange_code, market in (("tse", "TWSE"), ("otc", "TPEX")):
+        row = _request_twse_mis_row(session, symbol, exchange_code)
+        if str(row.get("c") or "") != symbol:
+            continue
+        name = str(row.get("n") or "").strip()
+        if not name:
+            continue
+        return StockProfileSnapshot(
+            symbol=symbol,
+            name=name,
+            asset_type="ETF" if symbol.startswith("00") else "STOCK",
+            market=market,
+        )
+    raise ValueError(f"Could not discover market profile for {symbol}.")
+
+
+def _request_twse_mis_row(session: requests.Session, symbol: str, exchange_code: str) -> dict:
+    response = session.get(
+        f"{TWSE_MIS_BASE_URL}/api/getStockInfo.jsp",
+        params={
+            "ex_ch": f"{exchange_code}_{symbol}.tw",
+            "json": "1",
+            "delay": "0",
+            "_": str(int(time.time() * 1000)),
+        },
+        headers={"Referer": f"{TWSE_MIS_BASE_URL}/fibest.jsp?stock={symbol}"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rows = payload.get("msgArray") or []
+    return rows[0] if rows else {}
 
 
 def _fetch_finmind_latest_daily_quote(symbol: str, token: str | None) -> QuoteSnapshot:
@@ -772,6 +875,16 @@ def _parse_twse_mis_datetime(date_value, time_value) -> datetime:
         return parsed.replace(tzinfo=TAIPEI_TZ)
     except (TypeError, ValueError):
         return datetime.now(TAIPEI_TZ)
+
+
+def _parse_twse_report_date(value) -> date | None:
+    raw = re.sub(r"\D", "", str(value or ""))
+    if len(raw) != 7:
+        return None
+    try:
+        return date(int(raw[:3]) + 1911, int(raw[3:5]), int(raw[5:7]))
+    except ValueError:
+        return None
 
 
 def _date_to_close_time(value) -> datetime:

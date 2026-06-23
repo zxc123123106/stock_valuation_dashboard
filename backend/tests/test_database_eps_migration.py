@@ -1,18 +1,53 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
-from backend.app.database import Base, Stock, StockEPS, StockValuation, apply_layered_stock_refresh, ensure_analysis_cache_columns, remove_legacy_histock_eps
+from backend.app.database import Base, Stock, StockEPS, StockMetric, StockPEHistory, StockValuation, apply_layered_stock_refresh, backfill_latest_metric_pe_from_history, ensure_analysis_cache_columns, remove_legacy_histock_eps
 import backend.app.database as database
 
 
 class EpsSourceMigrationTest(unittest.TestCase):
+    def test_latest_finmind_pe_history_backfills_stale_current_pe(self) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        now = datetime.now(UTC)
+
+        with Session(engine) as session:
+            stock = Stock(symbol="4958", name="臻鼎-KY", asset_type="STOCK", market="TWSE")
+            session.add(stock)
+            session.flush()
+            session.add(StockMetric(
+                stock_id=stock.id,
+                current_price=Decimal("631.00"),
+                current_pe=Decimal("90.55"),
+                price_updated_at=now,
+                pe_updated_at=now,
+                source="TWSE OpenAPI BWIBBU_ALL",
+            ))
+            session.add(StockPEHistory(
+                stock_id=stock.id,
+                trade_date=date(2026, 6, 22),
+                per=Decimal("87.73"),
+                source="FinMind TaiwanStockPER",
+                fetched_at=now,
+            ))
+            session.flush()
+
+            backfill_latest_metric_pe_from_history(session)
+            session.flush()
+            metric = session.scalar(select(StockMetric).where(StockMetric.stock_id == stock.id))
+
+        engine.dispose()
+
+        self.assertEqual(metric.current_pe, Decimal("87.73"))
+        self.assertEqual(metric.pe_data_date, date(2026, 6, 22))
+
     def test_negative_eps_with_no_valid_pe_does_not_create_valuations(self) -> None:
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)

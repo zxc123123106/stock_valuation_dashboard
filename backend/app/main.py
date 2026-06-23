@@ -178,6 +178,20 @@ def _active_valuations_count(session: Session) -> int:
     ) or 0
 
 
+def _latest_official_data_date(session: Session) -> date | None:
+    daily_date = session.scalar(
+        select(func.max(StockDailyPrice.trade_date))
+        .join(Stock)
+        .where(Stock.is_active.is_(True))
+    )
+    pe_date = session.scalar(
+        select(func.max(StockMetric.pe_data_date))
+        .join(Stock)
+        .where(Stock.is_active.is_(True))
+    )
+    return max((value for value in (daily_date, pe_date) if value is not None), default=None)
+
+
 def _valuation_response(valuation: StockValuation, buy_price: Decimal | None = None) -> StockValuationResponse:
     eps_period = None
     if valuation.stock:
@@ -442,6 +456,7 @@ def _stock_response(stock: Stock, session: Session) -> StockResponse:
             pe_vs_average_percent=_optional_float(metric.pe_vs_average_percent),
             price_updated_at=metric.price_updated_at,
             pe_updated_at=metric.pe_updated_at,
+            pe_data_date=metric.pe_data_date,
             source=metric.source,
         )
         if metric
@@ -640,6 +655,11 @@ def _ai_stock_summary(stock: Stock, session: Session, analysis_mode: str) -> dic
             "pe_max_3y": metric.pe_max_3y,
             "current_pe_vs_average_percent": metric.pe_vs_average_percent,
             "pe_updated_at": metric.pe_updated_at.isoformat(),
+            "pe_data_date": (
+                getattr(metric, "pe_data_date", None).isoformat()
+                if getattr(metric, "pe_data_date", None)
+                else None
+            ),
         },
         "valuation_scenarios": [
             _ai_valuation_summary(valuation, analysis_mode)
@@ -1008,7 +1028,7 @@ def health() -> HealthResponse:
 async def metadata(session: Session = Depends(get_session)) -> MetadataResponse:
     refresh_status = await refresh_manager.snapshot()
     return MetadataResponse(
-        data_source="TWSE/FinMind quote + TWSE OpenAPI PE + FinMind EPS/fundamentals/daily prices + Yahoo broker trading",
+        data_source="TWSE/FinMind quote + TWSE/FinMind latest-date PE + FinMind EPS/fundamentals/daily prices + Yahoo broker trading",
         api_version=settings.api_version,
         stocks_count=len(_active_stocks(session)),
         valuations_count=_active_valuations_count(session),
@@ -1020,6 +1040,7 @@ async def metadata(session: Session = Depends(get_session)) -> MetadataResponse:
         next_auto_refresh_at=refresh_status["next_auto_refresh_at"],
         last_refresh_finished_at=refresh_status["last_refresh_finished_at"],
         last_close_verification_at=refresh_status["last_close_verification_at"],
+        latest_official_data_date=_latest_official_data_date(session),
     )
 
 

@@ -36,7 +36,7 @@ from .market_data import (
     fetch_monthly_revenues,
     fetch_pe_history,
     fetch_stock_eps,
-    fetch_stock_pe,
+    fetch_stock_pe_snapshot,
     fetch_stock_profile,
     fetch_stock_quote,
     normalize_symbol,
@@ -46,9 +46,8 @@ from .yahoo_broker import fetch_broker_trading
 
 
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
-MARKET_OPEN_TIME = time(9, 0)
-MARKET_AUTO_REFRESH_END_TIME = time(14, 0)
-REFRESH_WINDOW_LABEL = "平日 09:00-14:00 Asia/Taipei"
+MARKET_CLOSE_VERIFICATION_TIME = time(18, 0)
+REFRESH_WINDOW_LABEL = "24 小時不間斷 Asia/Taipei"
 CLOSE_VERIFICATION_JOB_NAME = "market_close_verification"
 RETRY_BACKOFF_SECONDS = (60, 180, 300, 900)
 
@@ -255,10 +254,10 @@ class BackgroundRefreshManager:
             async with self._lock:
                 self._next_auto_refresh_at = _next_auto_refresh_at(now, self.interval_seconds)
 
-            if _auto_refresh_enabled(now):
-                await self.queue_active_stocks()
-            elif await asyncio.to_thread(_close_verification_due, now):
+            if await asyncio.to_thread(_close_verification_due, now):
                 await self._run_close_verification()
+            else:
+                await self.queue_active_stocks()
 
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self.interval_seconds)
@@ -268,7 +267,7 @@ class BackgroundRefreshManager:
 
     async def _run_close_verification(self) -> None:
         started_at = datetime.now(UTC)
-        states = await self.queue_active_stocks()
+        states = await self.queue_active_stocks(force_full=True)
         if self._queue:
             await self._queue.join()
         await asyncio.to_thread(_log_close_verification_result, started_at, len(states))
@@ -532,45 +531,15 @@ def _is_weekday(value: datetime) -> bool:
 
 
 def _auto_refresh_enabled(now: datetime) -> bool:
-    local_now = _to_taipei(now)
-    return (
-        local_now.weekday() < 5
-        and MARKET_OPEN_TIME <= local_now.time() < MARKET_AUTO_REFRESH_END_TIME
-    )
+    return True
 
 
 def _market_session(now: datetime) -> str:
-    local_now = _to_taipei(now)
-    if local_now.weekday() >= 5:
-        return "weekend"
-    if local_now.time() < MARKET_OPEN_TIME:
-        return "pre_open"
-    if local_now.time() < MARKET_AUTO_REFRESH_END_TIME:
-        return "open"
-    return "post_close"
-
-
-def _next_market_open(now: datetime) -> datetime:
-    local_now = _to_taipei(now)
-    candidate = local_now.replace(
-        hour=MARKET_OPEN_TIME.hour,
-        minute=MARKET_OPEN_TIME.minute,
-        second=0,
-        microsecond=0,
-    )
-    if local_now.weekday() < 5 and local_now < candidate:
-        return candidate.astimezone(UTC)
-
-    candidate = candidate + timedelta(days=1)
-    while candidate.weekday() >= 5:
-        candidate = candidate + timedelta(days=1)
-    return candidate.astimezone(UTC)
+    return "always_on"
 
 
 def _next_auto_refresh_at(now: datetime, interval_seconds: int) -> datetime:
-    if _auto_refresh_enabled(now):
-        return _as_aware_utc(now) + timedelta(seconds=interval_seconds)
-    return _next_market_open(now)
+    return _as_aware_utc(now) + timedelta(seconds=interval_seconds)
 
 
 def _is_same_day(value: datetime | None, now: datetime) -> bool:
@@ -585,12 +554,7 @@ def _is_same_refresh_day(value: datetime | None, now: datetime) -> bool:
 
     local_value = _to_taipei(value)
     local_now = _to_taipei(now)
-    if local_value.date() != local_now.date():
-        return False
-
-    if local_now.time() >= MARKET_OPEN_TIME:
-        return local_value.time() >= MARKET_OPEN_TIME
-    return True
+    return local_value.date() == local_now.date()
 
 
 def _last_close_verification_at() -> datetime | None:
@@ -608,11 +572,14 @@ def _last_close_verification_at() -> datetime | None:
 
 
 def _close_verification_due(now: datetime) -> bool:
-    if not _is_weekday(now) or _to_taipei(now).time() < MARKET_AUTO_REFRESH_END_TIME:
+    if not _is_weekday(now) or _to_taipei(now).time() < MARKET_CLOSE_VERIFICATION_TIME:
         return False
 
     last_finished_at = _last_close_verification_at()
-    return not _is_same_day(last_finished_at, now)
+    return not (
+        _is_same_day(last_finished_at, now)
+        and _to_taipei(last_finished_at).time() >= MARKET_CLOSE_VERIFICATION_TIME
+    )
 
 
 def _log_close_verification_result(started_at: datetime, symbols_count: int) -> None:
@@ -778,6 +745,7 @@ def _refresh_symbol_sync(
     quote = fetch_stock_quote(symbol, profile=profile, finmind_token=finmind_token)
     source_parts.append(quote.source)
     current_pe = None
+    pe_data_date = None
     pe_updated_at = None
     eps_rows = None
     eps_updated_at = None
@@ -791,7 +759,7 @@ def _refresh_symbol_sync(
         messages.append("ETF 僅更新現價")
     elif pe_due:
         try:
-            current_pe = fetch_stock_pe(
+            pe_snapshot = fetch_stock_pe_snapshot(
                 symbol,
                 finmind_token=finmind_token,
                 end_date=started_at.astimezone(TAIPEI_TZ).date(),
@@ -800,13 +768,17 @@ def _refresh_symbol_sync(
             messages.append(f"PE 更新失敗，沿用快取：{exc}")
             source_parts.append("cached PE")
         else:
-            if current_pe is None:
-                messages.append("TWSE PE 暫無資料，沿用快取")
+            current_pe = pe_snapshot.current_pe
+            pe_data_date = pe_snapshot.trade_date
+            pe_updated_at = calculated_at
+            if current_pe is None and pe_data_date is None:
+                messages.append("TWSE/FinMind PE 暫無資料，沿用快取")
                 source_parts.append("cached PE")
+                pe_updated_at = None
             else:
-                pe_updated_at = calculated_at
-                messages.append("PE 已按日更新")
-                source_parts.append("TWSE/FinMind daily PE")
+                data_date_label = pe_data_date.isoformat() if pe_data_date else "最新日期"
+                messages.append(f"PE 已更新至 {data_date_label}")
+                source_parts.append(pe_snapshot.source)
     else:
         messages.append("PE 沿用今日快取")
         source_parts.append("cached daily PE")
@@ -929,6 +901,7 @@ def _refresh_symbol_sync(
                 eps_updated_at=eps_updated_at,
                 source=source,
                 calculated_at=calculated_at,
+                pe_data_date=pe_data_date,
             )
             if broker_trading:
                 apply_broker_trading_snapshot(session, stock, broker_trading)
