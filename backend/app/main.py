@@ -55,6 +55,11 @@ from .schemas import (
     BrokerOptionResponse,
     BrokerSettingRequest,
     BrokerSettingResponse,
+    FuturesWtxResponse,
+    FundamentalTrendCategoryResponse,
+    FundamentalTrendPointResponse,
+    FundamentalTrendSummaryResponse,
+    FundamentalTrendsResponse,
     FundamentalResponse,
     HealthResponse,
     MetadataResponse,
@@ -77,6 +82,7 @@ from .schemas import (
     TechnicalCandleResponse,
 )
 from .refresh_worker import BackgroundRefreshManager
+from .taifex_futures import latest_wtx_response
 from .technical import MOVING_AVERAGE_PERIODS, moving_averages
 from .valuation import quantize_money, valuation_status
 from .market_data import normalize_symbol
@@ -416,6 +422,235 @@ def _fundamental_response(stock: Stock, session: Session) -> FundamentalResponse
         source=" + ".join(dict.fromkeys(source_values)) if source_values else None,
         fetched_at=max(fetched_values) if fetched_values else None,
     )
+
+
+def _fundamental_trends_response(stock: Stock, session: Session) -> FundamentalTrendsResponse:
+    quarters = session.scalars(
+        select(StockFinancialQuarter)
+        .where(StockFinancialQuarter.stock_id == stock.id)
+        .order_by(StockFinancialQuarter.quarter_date.asc())
+    ).all()
+    revenues = session.scalars(
+        select(StockMonthlyRevenue)
+        .where(StockMonthlyRevenue.stock_id == stock.id)
+        .order_by(StockMonthlyRevenue.month_date.asc())
+    ).all()
+    return FundamentalTrendsResponse(
+        symbol=stock.symbol,
+        categories=_fundamental_trend_categories(list(quarters), list(revenues)),
+    )
+
+
+def _fundamental_trend_categories(
+    quarters: list[StockFinancialQuarter],
+    revenues: list[StockMonthlyRevenue],
+) -> list[FundamentalTrendCategoryResponse]:
+    categories: list[FundamentalTrendCategoryResponse] = []
+    quarter_points = _latest_year_quarters(quarters)
+    revenue_points = _latest_year_revenues(revenues)
+    quarter_by_date = {row.quarter_date: row for row in quarters}
+    quarter_index = {row.quarter_date: index for index, row in enumerate(quarters)}
+
+    latest_quarter = quarters[-1] if quarters else None
+    latest_quarter_index = len(quarters) - 1 if quarters else None
+    latest_revenue = revenues[-1] if revenues else None
+    latest_revenue_yoy_values = [row.yoy_percent for row in revenues[-3:] if row.yoy_percent is not None]
+    three_month_yoy = _average_decimals(latest_revenue_yoy_values)
+
+    eps_yoy = _quarter_eps_yoy(latest_quarter, quarter_by_date) if latest_quarter else None
+    ttm_eps_yoy = _ttm_eps_yoy(quarters, latest_quarter_index) if latest_quarter_index is not None else None
+    categories.append(
+        FundamentalTrendCategoryResponse(
+            key="eps",
+            label="EPS",
+            unit="元",
+            summary=[
+                _fundamental_summary("latest_quarter_eps", "最新單季EPS", latest_quarter.eps if latest_quarter else None, "number"),
+                _fundamental_summary("eps_yoy_percent", "單季EPS YoY", eps_yoy, "percent"),
+                _fundamental_summary("ttm_eps_yoy_percent", "TTM EPS YoY", ttm_eps_yoy, "percent"),
+            ],
+            points=[
+                FundamentalTrendPointResponse(
+                    period=_quarter_label_from_date(row.quarter_date),
+                    date=row.quarter_date,
+                    value=_optional_float(row.eps),
+                    yoy_percent=_optional_float(_quarter_eps_yoy(row, quarter_by_date)),
+                    ttm_eps_yoy_percent=_optional_float(_ttm_eps_yoy(quarters, quarter_index[row.quarter_date])),
+                )
+                for row in quarter_points
+            ],
+            source=_fundamental_source(quarter_points),
+            fetched_at=_fundamental_fetched_at(quarter_points),
+        )
+    )
+
+    categories.append(
+        FundamentalTrendCategoryResponse(
+            key="monthly_revenue",
+            label="月營收",
+            unit="元",
+            summary=[
+                _fundamental_summary(
+                    "latest_revenue_yoy_percent",
+                    "最新月營收YoY",
+                    latest_revenue.yoy_percent if latest_revenue else None,
+                    "percent",
+                ),
+                _fundamental_summary(
+                    "latest_revenue_mom_percent",
+                    "最新月營收MoM",
+                    latest_revenue.mom_percent if latest_revenue else None,
+                    "percent",
+                ),
+                _fundamental_summary("three_month_revenue_yoy_percent", "近三月營收YoY", three_month_yoy, "percent"),
+            ],
+            points=[
+                FundamentalTrendPointResponse(
+                    period=_month_label_from_date(row.month_date),
+                    date=row.month_date,
+                    value=_optional_float(row.revenue),
+                    yoy_percent=_optional_float(row.yoy_percent),
+                    mom_percent=_optional_float(row.mom_percent),
+                )
+                for row in revenue_points
+            ],
+            source=_fundamental_source(revenue_points),
+            fetched_at=_fundamental_fetched_at(revenue_points),
+        )
+    )
+
+    margin_configs = [
+        ("gross_margin", "毛利率", "gross_profit"),
+        ("operating_margin", "營益率", "operating_income"),
+        ("net_margin", "淨利率", "net_income"),
+    ]
+    for key, label, field_name in margin_configs:
+        latest_margin = _quarter_margin(latest_quarter, field_name) if latest_quarter else None
+        latest_sos = _quarter_margin_sos(latest_quarter, field_name, quarter_by_date) if latest_quarter else None
+        categories.append(
+            FundamentalTrendCategoryResponse(
+                key=key,
+                label=label,
+                unit="%",
+                summary=[
+                    _fundamental_summary(key, label, latest_margin, "percent"),
+                    _fundamental_summary(f"{key}_sos", f"{label}SoS", latest_sos, "percent"),
+                ],
+                points=[
+                    FundamentalTrendPointResponse(
+                        period=_quarter_label_from_date(row.quarter_date),
+                        date=row.quarter_date,
+                        value=_optional_float(_quarter_margin(row, field_name)),
+                        sos_percent=_optional_float(_quarter_margin_sos(row, field_name, quarter_by_date)),
+                    )
+                    for row in quarter_points
+                ],
+                source=_fundamental_source(quarter_points),
+                fetched_at=_fundamental_fetched_at(quarter_points),
+            )
+        )
+
+    return categories
+
+
+def _latest_year_quarters(rows: list[StockFinancialQuarter]) -> list[StockFinancialQuarter]:
+    if not rows:
+        return []
+    latest = rows[-1].quarter_date
+    start = date(latest.year - 1, latest.month, latest.day)
+    return [row for row in rows if row.quarter_date >= start]
+
+
+def _latest_year_revenues(rows: list[StockMonthlyRevenue]) -> list[StockMonthlyRevenue]:
+    if not rows:
+        return []
+    latest = rows[-1].month_date
+    start = date(latest.year - 1, latest.month, 1)
+    return [row for row in rows if row.month_date >= start]
+
+
+def _quarter_eps_yoy(
+    row: StockFinancialQuarter | None,
+    rows_by_date: dict[date, StockFinancialQuarter],
+) -> Decimal | None:
+    if row is None:
+        return None
+    prior = rows_by_date.get(date(row.quarter_date.year - 1, row.quarter_date.month, row.quarter_date.day))
+    return _optional_percent(row.eps - prior.eps, prior.eps) if prior else None
+
+
+def _ttm_eps_yoy(rows: list[StockFinancialQuarter], index: int | None) -> Decimal | None:
+    if index is None or index < 7:
+        return None
+    latest_ttm = sum((row.eps for row in rows[index - 3 : index + 1]), Decimal("0"))
+    previous_ttm = sum((row.eps for row in rows[index - 7 : index - 3]), Decimal("0"))
+    return _optional_percent(latest_ttm - previous_ttm, previous_ttm)
+
+
+def _quarter_margin(row: StockFinancialQuarter | None, field_name: str) -> Decimal | None:
+    return _margin(getattr(row, field_name), row.revenue) if row else None
+
+
+def _quarter_margin_sos(
+    row: StockFinancialQuarter | None,
+    field_name: str,
+    rows_by_date: dict[date, StockFinancialQuarter],
+) -> Decimal | None:
+    if row is None:
+        return None
+    current_margin = _quarter_margin(row, field_name)
+    previous = rows_by_date.get(_previous_quarter_date(row.quarter_date))
+    previous_margin = _quarter_margin(previous, field_name)
+    if current_margin is None or previous_margin is None:
+        return None
+    return quantize_money(current_margin - previous_margin)
+
+
+def _previous_quarter_date(value: date) -> date:
+    if value.month == 3:
+        return date(value.year - 1, 12, 31)
+    if value.month == 6:
+        return date(value.year, 3, 31)
+    if value.month == 9:
+        return date(value.year, 6, 30)
+    return date(value.year, 9, 30)
+
+
+def _quarter_label_from_date(value: date) -> str:
+    return f"{value.year}Q{((value.month - 1) // 3) + 1}"
+
+
+def _month_label_from_date(value: date) -> str:
+    return f"{value.year}/{value.month:02d}"
+
+
+def _average_decimals(values: list[Decimal]) -> Decimal | None:
+    if not values:
+        return None
+    return quantize_money(sum(values, Decimal("0")) / Decimal(len(values)))
+
+
+def _fundamental_summary(
+    key: str,
+    label: str,
+    value: Decimal | None,
+    value_type: str,
+) -> FundamentalTrendSummaryResponse:
+    return FundamentalTrendSummaryResponse(
+        key=key,
+        label=label,
+        value=_optional_float(value),
+        value_type=value_type,
+    )
+
+
+def _fundamental_source(rows) -> str | None:
+    return " + ".join(dict.fromkeys(row.source for row in rows if row.source)) or None
+
+
+def _fundamental_fetched_at(rows) -> datetime | None:
+    values = [row.fetched_at for row in rows if row.fetched_at is not None]
+    return max(values) if values else None
 
 
 def _stock_response(stock: Stock, session: Session) -> StockResponse:
@@ -1049,6 +1284,11 @@ def get_broker_setting(session: Session = Depends(get_session)) -> BrokerSetting
     return _broker_setting_response(session)
 
 
+@app.get("/api/futures/wtx", response_model=FuturesWtxResponse)
+def get_wtx_futures() -> FuturesWtxResponse:
+    return FuturesWtxResponse(**latest_wtx_response())
+
+
 @app.put("/api/settings/broker", response_model=BrokerSettingResponse)
 def update_broker_setting(
     payload: BrokerSettingRequest,
@@ -1115,6 +1355,22 @@ def get_stock(symbol: str, session: Session = Depends(get_session)) -> StockResp
         raise HTTPException(status_code=404, detail="Stock not found")
 
     return _stock_response(stock, session)
+
+
+@app.get("/api/stocks/{symbol}/fundamentals/trends", response_model=FundamentalTrendsResponse)
+def get_stock_fundamental_trends(symbol: str, session: Session = Depends(get_session)) -> FundamentalTrendsResponse:
+    try:
+        normalized_symbol = normalize_symbol(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    stock = session.scalar(select(Stock).where(Stock.symbol == normalized_symbol, Stock.is_active.is_(True)))
+    if not stock:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    if stock.asset_type == "ETF":
+        raise HTTPException(status_code=404, detail="Fundamentals are not applicable to ETFs")
+
+    return _fundamental_trends_response(stock, session)
 
 
 @app.get("/api/stocks/{symbol}/ai-analysis/latest", response_model=StockAIAnalysisResponse)

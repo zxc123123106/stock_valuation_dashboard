@@ -347,6 +347,51 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
+class FuturesSnapshot(Base):
+    __tablename__ = "futures_snapshots"
+
+    symbol: Mapped[str] = mapped_column(String(24), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    session_type: Mapped[str] = mapped_column(String(16), default="closed")
+    session_label: Mapped[str] = mapped_column(String(24), default="最近一盤")
+    session_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    current_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    open_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    difference_points: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    difference_percent: Mapped[Decimal] = mapped_column(Numeric(8, 2))
+    price_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(String(120))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class FuturesIntradayPoint(Base):
+    __tablename__ = "futures_intraday_points"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            "session_type",
+            "session_date",
+            "point_time",
+            name="uq_futures_intraday_point_minute",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(24), index=True)
+    session_type: Mapped[str] = mapped_column(String(16), index=True)
+    session_date: Mapped[date] = mapped_column(Date, index=True)
+    point_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    open_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    difference_percent: Mapped[Decimal] = mapped_column(Numeric(8, 2))
+    source: Mapped[str] = mapped_column(String(120))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
 def get_session() -> Generator[Session, None, None]:
     with SessionLocal() as session:
         yield session

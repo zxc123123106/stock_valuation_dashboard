@@ -42,6 +42,7 @@ from .market_data import (
     normalize_symbol,
     StockProfileSnapshot,
 )
+from .taifex_futures import refresh_wtx_futures_cache
 from .yahoo_broker import fetch_broker_trading
 
 
@@ -81,6 +82,7 @@ class BackgroundRefreshManager:
         self._stop_event: asyncio.Event | None = None
         self._consumer_task: asyncio.Task | None = None
         self._ticker_task: asyncio.Task | None = None
+        self._futures_task: asyncio.Task | None = None
         self._current_symbol: str | None = None
         self._deleted_symbols: set[str] = set()
         self._next_auto_refresh_at: datetime | None = None
@@ -94,12 +96,13 @@ class BackgroundRefreshManager:
         self._stop_event = asyncio.Event()
         self._consumer_task = asyncio.create_task(self._consume_queue(), name="stock-refresh-consumer")
         self._ticker_task = asyncio.create_task(self._run_ticker(), name="stock-refresh-ticker")
+        self._futures_task = asyncio.create_task(self._run_futures_ticker(), name="wtx-futures-refresh-ticker")
 
     async def stop(self) -> None:
         if self._stop_event:
             self._stop_event.set()
 
-        tasks = [task for task in (self._consumer_task, self._ticker_task) if task]
+        tasks = [task for task in (self._consumer_task, self._ticker_task, self._futures_task) if task]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -259,6 +262,18 @@ class BackgroundRefreshManager:
             else:
                 await self.queue_active_stocks()
 
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self.interval_seconds)
+                return
+            except TimeoutError:
+                continue
+
+    async def _run_futures_ticker(self) -> None:
+        if not self._stop_event:
+            return
+
+        while True:
+            await asyncio.to_thread(refresh_wtx_futures_cache)
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self.interval_seconds)
                 return

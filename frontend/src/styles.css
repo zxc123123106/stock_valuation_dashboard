@@ -292,6 +292,109 @@ h1 {
   color: #c7f8df;
 }
 
+.futures-card {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--surface), #111110);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+}
+
+.futures-header,
+.futures-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.futures-header > div,
+.futures-session {
+  display: grid;
+  gap: 4px;
+}
+
+.futures-kicker,
+.futures-session span,
+.futures-open span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.futures-header strong {
+  color: var(--text-strong);
+  font-size: 1.05rem;
+}
+
+.futures-session {
+  text-align: right;
+}
+
+.futures-session small {
+  color: var(--muted-soft);
+  font-size: 0.78rem;
+}
+
+.futures-quote {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 14px;
+  min-width: 0;
+}
+
+.futures-quote > strong {
+  font-size: clamp(2rem, 6vw, 3.45rem);
+  line-height: 0.95;
+  letter-spacing: 0;
+}
+
+.futures-quote > span {
+  font-size: clamp(1.15rem, 3vw, 2.05rem);
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.futures-open {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  min-width: 112px;
+}
+
+.futures-open strong {
+  color: var(--gold-strong);
+  font-size: 1.12rem;
+}
+
+.futures-open em {
+  color: var(--muted-soft);
+  font-size: 0.76rem;
+  font-style: normal;
+}
+
+.futures-chart {
+  width: 100%;
+  height: 180px;
+  overflow: hidden;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 12px;
+}
+
+.futures-chart.empty-chart {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted);
+  font-weight: 650;
+}
+
 .stock-grid {
   display: grid;
   gap: 14px;
@@ -752,65 +855,173 @@ h1 {
   padding: 2px 0 16px;
 }
 
-.fundamental-table {
-  display: grid;
+.fundamental-tabs {
+  display: inline-flex;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px;
+  margin: 0 0 14px;
   overflow-x: auto;
-  gap: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
 }
 
-.fundamental-row {
-  display: grid;
-  gap: 8px;
-  align-items: center;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.fundamental-row-3,
-.fundamental-row-2 {
-  grid-template-columns: minmax(88px, 112px) repeat(3, minmax(118px, 1fr));
-  min-width: 500px;
-}
-
-.fundamental-row-head {
-  padding-bottom: 8px;
+.fundamental-tabs button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: var(--muted);
-  font-size: 0.78rem;
-  font-weight: 650;
+  font-weight: 700;
+  cursor: pointer;
 }
 
-.fundamental-row-head + .fundamental-row {
-  padding-top: 6px;
+.fundamental-tabs button.active {
+  background: rgba(226, 200, 121, 0.16);
+  color: var(--gold-strong);
 }
 
-.fundamental-row span:not(:first-child) {
-  text-align: right;
+.fundamental-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 180px;
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
-.fundamental-row strong {
+.fundamental-loading svg {
+  animation: spin 0.9s linear infinite;
+}
+
+.fundamental-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--line-soft);
+}
+
+.fundamental-summary-card {
+  min-height: 82px;
+  padding: 14px;
+  background: rgba(13, 13, 12, 0.92);
+}
+
+.fundamental-summary-card span {
   display: block;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
-.fundamental-row > span:first-child strong {
-  color: var(--text);
-  font-size: 1.08rem;
+.fundamental-summary-card strong {
+  display: block;
+  margin-top: 9px;
+  font-size: 1.12rem;
   font-weight: 800;
 }
 
-.fundamental-row .constant-value {
+.fundamental-summary-card .constant-value {
   color: var(--gold-strong);
+}
+
+.fundamental-chart-card {
+  position: relative;
+  margin-top: 14px;
+  padding: 10px 8px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(8, 8, 7, 0.66);
+}
+
+.fundamental-trend-chart {
+  display: block;
+  width: 100%;
+  height: 280px;
+  touch-action: none;
+}
+
+.fundamental-grid-line {
+  stroke: rgba(226, 200, 121, 0.14);
+  stroke-width: 1;
+}
+
+.fundamental-grid-line.soft {
+  stroke: rgba(226, 200, 121, 0.08);
+}
+
+.fundamental-axis-label {
+  fill: var(--muted);
+  font-size: 0.72rem;
   font-weight: 650;
 }
 
-.fundamental-row .percentage-positive {
-  color: var(--danger);
+.fundamental-line {
+  stroke: var(--danger);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.fundamental-row .percentage-negative {
-  color: var(--success);
+.fundamental-point {
+  fill: var(--surface);
+  stroke: var(--danger);
+  stroke-width: 3;
 }
 
-.fundamental-row .percentage-zero {
+.fundamental-point.active {
+  stroke: var(--gold-strong);
+  filter: drop-shadow(0 0 7px rgba(226, 200, 121, 0.34));
+}
+
+.fundamental-crosshair {
+  stroke: rgba(230, 222, 204, 0.35);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.fundamental-tooltip {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  gap: 4px;
+  min-width: 176px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(16, 16, 14, 0.94);
+  color: var(--muted);
+  font-size: 0.78rem;
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+.fundamental-tooltip strong {
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.fundamental-tooltip b {
+  color: var(--gold-strong);
+  font-weight: 800;
+}
+
+.fundamental-chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 220px;
+  margin-top: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
   color: var(--muted);
 }
 
@@ -1341,6 +1552,15 @@ footer a {
     width: 100%;
   }
 
+  .futures-main {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .futures-open {
+    justify-items: start;
+  }
+
   .text-button {
     width: 100%;
   }
@@ -1362,6 +1582,28 @@ footer a {
   .broker-summary,
   .broker-rankings {
     grid-template-columns: 1fr;
+  }
+
+  .futures-card {
+    padding: 14px 12px;
+  }
+
+  .futures-header {
+    flex-direction: column;
+  }
+
+  .futures-session {
+    text-align: left;
+  }
+
+  .futures-quote {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .futures-chart {
+    height: 150px;
   }
 
   .stock-metrics {
@@ -1389,6 +1631,23 @@ footer a {
   .technical-summary-volume {
     grid-template-columns: repeat(2, minmax(128px, 1fr));
     min-width: 256px;
+  }
+
+  .fundamental-tabs {
+    display: flex;
+  }
+
+  .fundamental-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .fundamental-trend-chart {
+    height: 240px;
+  }
+
+  .fundamental-tooltip {
+    position: static;
+    margin-top: 8px;
   }
 
   .ai-analysis-toggle {

@@ -135,6 +135,28 @@ class TechnicalAnalysisResponse(BaseModel):
     candles: list[TechnicalCandleResponse]
 
 
+class FuturesChartPointResponse(BaseModel):
+    timestamp: datetime
+    price: float
+    difference_percent: float
+
+
+class FuturesWtxResponse(BaseModel):
+    symbol: str
+    name: str
+    session_type: str
+    session_label: str
+    session_start_at: datetime | None = None
+    session_end_at: datetime | None = None
+    current_price: float | None = None
+    open_price: float | None = None
+    difference_points: float | None = None
+    difference_percent: float | None = None
+    price_updated_at: datetime | None = None
+    is_stale: bool = True
+    chart_points: list[FuturesChartPointResponse] = []
+
+
 class FundamentalResponse(BaseModel):
     latest_quarter_eps: float | None = None
     eps_yoy_percent: float | None = None
@@ -150,6 +172,38 @@ class FundamentalResponse(BaseModel):
     net_margin_sos: float | None = None
     source: str | None = None
     fetched_at: datetime | None = None
+
+
+class FundamentalTrendSummaryResponse(BaseModel):
+    key: str
+    label: str
+    value: float | None = None
+    value_type: str = "number"
+
+
+class FundamentalTrendPointResponse(BaseModel):
+    period: str
+    date: date
+    value: float | None = None
+    yoy_percent: float | None = None
+    mom_percent: float | None = None
+    sos_percent: float | None = None
+    ttm_eps_yoy_percent: float | None = None
+
+
+class FundamentalTrendCategoryResponse(BaseModel):
+    key: str
+    label: str
+    unit: str
+    summary: list[FundamentalTrendSummaryResponse]
+    points: list[FundamentalTrendPointResponse]
+    source: str | None = None
+    fetched_at: datetime | None = None
+
+
+class FundamentalTrendsResponse(BaseModel):
+    symbol: str
+    categories: list[FundamentalTrendCategoryResponse]
 
 
 class StockResponse(BaseModel):

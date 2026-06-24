@@ -52,6 +52,15 @@ const BACKGROUND_REFRESH_SECONDS = 60;
 const MA_PERIODS = [5, 10, 20, 60, 120, 240];
 const MA_VISIBILITY_STORAGE_KEY = "stock-dashboard-visible-ma-lines";
 const AI_MODE_STORAGE_PREFIX = "stock-dashboard-ai-analysis-mode";
+const FUNDAMENTAL_CATEGORY_STORAGE_PREFIX = "stock-dashboard-fundamental-category";
+const FUNDAMENTAL_CATEGORY_KEYS = ["eps", "monthly_revenue", "gross_margin", "operating_margin", "net_margin"];
+const FUNDAMENTAL_CATEGORY_LABELS = {
+  eps: "EPS",
+  monthly_revenue: "月營收",
+  gross_margin: "毛利率",
+  operating_margin: "營益率",
+  net_margin: "淨利率",
+};
 const MA_LINE_COLORS = {
   5: "#f08f7f",
   10: "#e2c879",
@@ -201,6 +210,66 @@ function comparisonToneClass(value) {
   return percentageToneClass(value);
 }
 
+function loadFundamentalCategory(symbol) {
+  try {
+    const stored = window.localStorage.getItem(`${FUNDAMENTAL_CATEGORY_STORAGE_PREFIX}:${symbol}`);
+    return FUNDAMENTAL_CATEGORY_KEYS.includes(stored) ? stored : "eps";
+  } catch {
+    return "eps";
+  }
+}
+
+function storeFundamentalCategory(symbol, categoryKey) {
+  try {
+    window.localStorage.setItem(`${FUNDAMENTAL_CATEGORY_STORAGE_PREFIX}:${symbol}`, categoryKey);
+  } catch {
+    // Storage is optional; category switching still works for the current render.
+  }
+}
+
+function formatFundamentalMetric(value, valueType = "number", categoryKey = "") {
+  if (value === null || value === undefined) {
+    return "待更新";
+  }
+  if (valueType === "percent") {
+    return formatOptionalSignedPercent(value);
+  }
+  if (categoryKey === "monthly_revenue") {
+    return `${formatNumber(Number(value) / 100000000)} 億`;
+  }
+  return formatNumber(value);
+}
+
+function fundamentalToneClass(value, valueType = "number") {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return valueType === "percent" ? percentageToneClass(value) : "constant-value";
+}
+
+function trendDisplayValue(value, categoryKey) {
+  if (value === null || value === undefined) {
+    return "待更新";
+  }
+  if (categoryKey === "monthly_revenue") {
+    return `${formatNumber(Number(value) / 100000000)} 億`;
+  }
+  if (categoryKey === "gross_margin" || categoryKey === "operating_margin" || categoryKey === "net_margin") {
+    return `${formatNumber(value)}%`;
+  }
+  return formatNumber(value);
+}
+
+function trendNumericValue(value, categoryKey) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (categoryKey === "monthly_revenue") {
+    return Number(value) / 100000000;
+  }
+  return Number(value);
+}
+
 function formatTradingDate(value) {
   if (!value) {
     return "待更新";
@@ -221,6 +290,19 @@ function formatDate(value) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function formatTaipeiTime(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  const timestamp = typeof value === "number" ? value * 1000 : new Date(value).getTime();
+  return new Intl.DateTimeFormat("zh-TW", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Taipei",
+  }).format(new Date(timestamp));
 }
 
 function formatCountdown(value, now) {
@@ -284,6 +366,7 @@ function isVisibleRefreshState(state, now) {
 
 function App() {
   const [stocks, setStocks] = useState([]);
+  const [futuresData, setFuturesData] = useState(null);
   const [metadata, setMetadata] = useState(null);
   const [brokerSetting, setBrokerSetting] = useState(null);
   const [refreshStatus, setRefreshStatus] = useState({ status: "idle", symbols: [], queue_length: 0 });
@@ -336,11 +419,12 @@ function App() {
     }
 
     try {
-      const [stockResponse, metadataResponse, statusResponse, brokerResponse] = await Promise.all([
+      const [stockResponse, metadataResponse, statusResponse, brokerResponse, futuresResponse] = await Promise.all([
         fetch(`${API_BASE_URL}/api/stocks`),
         fetch(`${API_BASE_URL}/api/metadata`),
         fetch(`${API_BASE_URL}/api/refresh/status`),
         fetch(`${API_BASE_URL}/api/settings/broker`),
+        fetch(`${API_BASE_URL}/api/futures/wtx`),
       ]);
 
       if (!stockResponse.ok) {
@@ -360,6 +444,7 @@ function App() {
       setMetadata(metadataResponse.ok ? await metadataResponse.json() : null);
       setRefreshStatus(await statusResponse.json());
       setBrokerSetting(await brokerResponse.json());
+      setFuturesData(futuresResponse.ok ? await futuresResponse.json() : null);
     } catch (requestError) {
       if (!silent) {
         setError(requestError.message);
@@ -791,6 +876,8 @@ function App() {
 
       {message && !error && <div className="notice success">{message}</div>}
 
+      <FuturesTrackerCard data={futuresData} />
+
       <section className="stock-grid" aria-label="stocks">
         {loading ? (
           <div className="empty">
@@ -1156,6 +1243,7 @@ const StockCard = React.forwardRef(function StockCard(
       <div className="stock-disclosures">
         {!isEtf && (
           <FundamentalDisclosure
+            symbol={stock.symbol}
             fundamental={stock.fundamental}
             expanded={fundamentalExpanded}
             onToggle={() => setFundamentalExpanded((current) => !current)}
@@ -1194,6 +1282,145 @@ function QuoteComparison({ label, value, currentPrice }) {
       </div>
     </div>
   );
+}
+
+function FuturesTrackerCard({ data }) {
+  const hasPrice = data?.current_price !== null && data?.current_price !== undefined;
+  const difference = data?.difference_points;
+  const percent = data?.difference_percent;
+  const direction = difference === null || difference === undefined || difference === 0 ? "－" : difference > 0 ? "▲" : "▼";
+  const toneClass = percentageToneClass(percent);
+
+  return (
+    <section className="futures-card" aria-label="台指期近一 WTX&">
+      <div className="futures-header">
+        <div>
+          <span className="futures-kicker">{data?.symbol || "WTX&"}</span>
+          <strong>{data?.name || "台指期近一"}</strong>
+        </div>
+        <div className="futures-session">
+          <span>{data?.session_label || "最近一盤"}</span>
+          <small>{data?.price_updated_at ? formatDate(data.price_updated_at) : "待更新"}</small>
+        </div>
+      </div>
+      <div className="futures-main">
+        <div className="futures-quote">
+          <strong className="constant-value">{hasPrice ? formatNumber(data.current_price) : "待更新"}</strong>
+          <span className={toneClass}>
+            {direction} {difference === null || difference === undefined ? "—" : formatNumber(Math.abs(difference))}
+            {" "}
+            ({formatOptionalSignedPercent(percent)})
+          </span>
+        </div>
+        <div className="futures-open">
+          <span>開盤價</span>
+          <strong>{formatOptionalNumber(data?.open_price)}</strong>
+          {data?.is_stale && <em>使用快取</em>}
+        </div>
+      </div>
+      <FuturesLineChart data={data} />
+    </section>
+  );
+}
+
+function FuturesLineChart({ data }) {
+  const containerRef = useRef(null);
+  const points = data?.chart_points || [];
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !points.length) {
+      return undefined;
+    }
+
+    const chart = createChart(container, {
+      autoSize: true,
+      layout: {
+        background: { color: "#111110" },
+        textColor: "#9f988d",
+        attributionLogo: false,
+      },
+      localization: {
+        timeFormatter: formatTaipeiTime,
+      },
+      grid: {
+        vertLines: { color: "rgba(226, 200, 121, 0.06)" },
+        horzLines: { color: "rgba(226, 200, 121, 0.06)" },
+      },
+      rightPriceScale: { borderColor: "rgba(226, 200, 121, 0.16)" },
+      timeScale: {
+        borderColor: "rgba(226, 200, 121, 0.16)",
+        timeVisible: true,
+        secondsVisible: false,
+        rightOffset: 0,
+        fixLeftEdge: true,
+        fixRightEdge: true,
+        tickMarkFormatter: formatTaipeiTime,
+      },
+      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+      handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+    });
+
+    const sessionStart = data?.session_start_at
+      ? Math.floor(new Date(data.session_start_at).getTime() / 1000)
+      : null;
+    const sessionEnd = data?.session_end_at ? Math.floor(new Date(data.session_end_at).getTime() / 1000) : null;
+    const lineData = points
+      .map((point) => ({
+        time: Math.floor(new Date(point.timestamp).getTime() / 1000),
+        value: point.difference_percent,
+      }))
+      .sort((left, right) => left.time - right.time);
+
+    const spacerData = [];
+    if (sessionStart !== null && sessionEnd !== null && lineData.length) {
+      const spacerValue = lineData[0].value;
+      for (let time = sessionStart; time <= sessionEnd; time += 60) {
+        spacerData.push({ time, value: spacerValue });
+      }
+    }
+
+    if (spacerData.length) {
+      const spacerSeries = chart.addSeries(LineSeries, {
+        color: "rgba(226, 200, 121, 0)",
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      });
+      spacerSeries.setData(spacerData);
+    }
+
+    const lineSeries = chart.addSeries(LineSeries, {
+      color: "#e2c879",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: true,
+    });
+    lineSeries.setData(lineData);
+    if (spacerData.length > 1) {
+      chart.timeScale().setVisibleLogicalRange({
+        from: 0,
+        to: spacerData.length - 1,
+      });
+    } else {
+      chart.timeScale().fitContent();
+    }
+
+    return () => chart.remove();
+  }, [data?.session_end_at, data?.session_start_at, points]);
+
+  if (!points.length) {
+    return (
+      <div className="futures-chart empty-chart">
+        <Wifi size={15} />
+        當盤圖表待更新
+      </div>
+    );
+  }
+
+  return <div className="futures-chart" ref={containerRef} />;
 }
 
 function TechnicalAnalysisDisclosure({ symbol, metricUpdatedAt, expanded, onToggle }) {
@@ -1753,7 +1980,57 @@ function AIAnalysisList({ title, items }) {
   );
 }
 
-function FundamentalDisclosure({ fundamental, expanded, onToggle }) {
+function FundamentalDisclosure({ symbol, fundamental, expanded, onToggle }) {
+  const [activeCategory, setActiveCategory] = useState(() => loadFundamentalCategory(symbol));
+  const [trends, setTrends] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setActiveCategory(loadFundamentalCategory(symbol));
+  }, [symbol]);
+
+  useEffect(() => {
+    if (!expanded || trends?.symbol === symbol) {
+      return undefined;
+    }
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    fetch(`${API_BASE_URL}/api/stocks/${symbol}/fundamentals/trends`, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.json();
+      })
+      .then((payload) => {
+        setTrends(payload);
+        const availableKeys = payload.categories?.map((category) => category.key) || [];
+        setActiveCategory((current) => (availableKeys.includes(current) ? current : "eps"));
+      })
+      .catch((fetchError) => {
+        if (fetchError.name !== "AbortError") {
+          setError("基本面趨勢資料讀取失敗");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, [expanded, symbol, trends?.symbol]);
+
+  const categories = trends?.categories || [];
+  const activeTrend = categories.find((category) => category.key === activeCategory) || categories[0] || null;
+  const toggleDate = activeTrend?.fetched_at || fundamental?.fetched_at;
+
+  const selectCategory = (categoryKey) => {
+    setActiveCategory(categoryKey);
+    storeFundamentalCategory(symbol, categoryKey);
+  };
+
   return (
     <div className="fundamental-disclosure">
       <button className="fundamental-toggle" type="button" onClick={onToggle} aria-expanded={expanded}>
@@ -1761,75 +2038,181 @@ function FundamentalDisclosure({ fundamental, expanded, onToggle }) {
           {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
           基本面
         </span>
-        <small>{fundamental?.fetched_at ? formatDate(fundamental.fetched_at) : "待更新"}</small>
+        <small>{toggleDate ? formatDate(toggleDate) : "待更新"}</small>
       </button>
       {expanded && (
         <div className="fundamental-panel">
-          <div className="fundamental-table">
-            <FundamentalRow
-              title="EPS"
-              cells={[
-                ["最新單季EPS", formatOptionalNumber(fundamental?.latest_quarter_eps)],
-                ["單季EPS YoY", formatOptionalSignedPercent(fundamental?.eps_yoy_percent), percentageToneClass(fundamental?.eps_yoy_percent)],
-                ["TTM EPS YoY", formatOptionalSignedPercent(fundamental?.ttm_eps_yoy_percent), percentageToneClass(fundamental?.ttm_eps_yoy_percent)],
-              ]}
-            />
-            <FundamentalRow
-              title="月營收"
-              cells={[
-                ["最新月營收YoY", formatOptionalSignedPercent(fundamental?.latest_revenue_yoy_percent), percentageToneClass(fundamental?.latest_revenue_yoy_percent)],
-                ["最新月營收MoM", formatOptionalSignedPercent(fundamental?.latest_revenue_mom_percent), percentageToneClass(fundamental?.latest_revenue_mom_percent)],
-                ["近三月營收YoY", formatOptionalSignedPercent(fundamental?.three_month_revenue_yoy_percent), percentageToneClass(fundamental?.three_month_revenue_yoy_percent)],
-              ]}
-            />
-            <FundamentalRow
-              title="毛利率"
-              cells={[
-                ["毛利率", formatOptionalSignedPercent(fundamental?.gross_margin), percentageToneClass(fundamental?.gross_margin)],
-                ["毛利率SoS", formatOptionalSignedPercent(fundamental?.gross_margin_sos), percentageToneClass(fundamental?.gross_margin_sos)],
-              ]}
-            />
-            <FundamentalRow
-              title="營益率"
-              cells={[
-                ["營益率", formatOptionalSignedPercent(fundamental?.operating_margin), percentageToneClass(fundamental?.operating_margin)],
-                ["營益率SoS", formatOptionalSignedPercent(fundamental?.operating_margin_sos), percentageToneClass(fundamental?.operating_margin_sos)],
-              ]}
-            />
-            <FundamentalRow
-              title="淨利率"
-              cells={[
-                ["淨利率", formatOptionalSignedPercent(fundamental?.net_margin), percentageToneClass(fundamental?.net_margin)],
-                ["淨利率SoS", formatOptionalSignedPercent(fundamental?.net_margin_sos), percentageToneClass(fundamental?.net_margin_sos)],
-              ]}
-            />
+          <div className="fundamental-tabs" role="tablist" aria-label={`${symbol} 基本面分類`}>
+            {FUNDAMENTAL_CATEGORY_KEYS.map((categoryKey) => (
+              <button
+                key={categoryKey}
+                type="button"
+                className={activeCategory === categoryKey ? "active" : ""}
+                onClick={() => selectCategory(categoryKey)}
+                role="tab"
+                aria-selected={activeCategory === categoryKey}
+              >
+                {FUNDAMENTAL_CATEGORY_LABELS[categoryKey]}
+              </button>
+            ))}
           </div>
-          <small className="fundamental-source">{fundamental?.source || "FinMind fundamental cache"}</small>
+          {loading ? (
+            <div className="fundamental-loading">
+              <Loader2 size={16} />
+              讀取基本面趨勢
+            </div>
+          ) : error ? (
+            <div className="valuation-empty">{error}</div>
+          ) : activeTrend ? (
+            <>
+              <div className="fundamental-summary-grid">
+                {activeTrend.summary.map((item) => (
+                  <div className="fundamental-summary-card" key={item.key}>
+                    <span>{item.label}</span>
+                    <strong className={fundamentalToneClass(item.value, item.value_type)}>
+                      {formatFundamentalMetric(item.value, item.value_type, activeTrend.key)}
+                    </strong>
+                  </div>
+                ))}
+              </div>
+              <FundamentalTrendChart category={activeTrend} />
+              <small className="fundamental-source">{activeTrend.source || fundamental?.source || "FinMind fundamental cache"}</small>
+            </>
+          ) : (
+            <div className="valuation-empty">基本面快取建立中</div>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function FundamentalRow({ title, cells }) {
+function FundamentalTrendChart({ category }) {
+  const [hoverIndex, setHoverIndex] = useState(null);
+  const chartWidth = 760;
+  const chartHeight = 280;
+  const margin = { top: 24, right: 26, bottom: 44, left: 52 };
+  const innerWidth = chartWidth - margin.left - margin.right;
+  const innerHeight = chartHeight - margin.top - margin.bottom;
+  const chartPoints = category.points || [];
+  const plotted = chartPoints.map((point, index) => ({
+    ...point,
+    index,
+    numericValue: trendNumericValue(point.value, category.key),
+  }));
+  const validPoints = plotted.filter((point) => point.numericValue !== null && Number.isFinite(point.numericValue));
+
+  if (!validPoints.length) {
+    return <div className="fundamental-chart-empty">趨勢資料待更新</div>;
+  }
+
+  const values = validPoints.map((point) => point.numericValue);
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const padding = rawMin === rawMax ? Math.max(1, Math.abs(rawMin) * 0.08) : (rawMax - rawMin) * 0.12;
+  const yMin = rawMin - padding;
+  const yMax = rawMax + padding;
+  const xScale = (index) => margin.left + (chartPoints.length <= 1 ? innerWidth / 2 : (index / (chartPoints.length - 1)) * innerWidth);
+  const yScale = (value) => margin.top + ((yMax - value) / (yMax - yMin)) * innerHeight;
+  const path = validPoints
+    .map((point, sequenceIndex) => `${sequenceIndex === 0 ? "M" : "L"} ${xScale(point.index)} ${yScale(point.numericValue)}`)
+    .join(" ");
+  const hoveredPoint = hoverIndex !== null ? plotted[hoverIndex] : validPoints[validPoints.length - 1];
+  const hoveredX = hoveredPoint ? xScale(hoveredPoint.index) : null;
+  const hoveredY = hoveredPoint?.numericValue !== null ? yScale(hoveredPoint.numericValue) : margin.top;
+  const labelStep = chartPoints.length > 9 ? 2 : 1;
+
+  const updateHover = (event) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const relativeX = ((event.clientX - bounds.left) / bounds.width) * chartWidth;
+    const nearest = plotted.reduce((best, point) => {
+      const distance = Math.abs(xScale(point.index) - relativeX);
+      return !best || distance < best.distance ? { index: point.index, distance } : best;
+    }, null);
+    if (nearest) {
+      setHoverIndex(nearest.index);
+    }
+  };
+
   return (
-    <div className="fundamental-group">
-      <div className={`fundamental-row fundamental-row-${cells.length} fundamental-row-head`}>
-        <span></span>
-        {cells.map(([label]) => (
-          <span key={`${title}-${label}`}>{label}</span>
+    <div className="fundamental-chart-card">
+      <svg
+        className="fundamental-trend-chart"
+        viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+        role="img"
+        aria-label={`${category.label} 過去一年趨勢`}
+        onPointerMove={updateHover}
+        onPointerDown={updateHover}
+        onPointerLeave={() => setHoverIndex(null)}
+      >
+        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+          const y = margin.top + ratio * innerHeight;
+          return (
+            <g key={`grid-y-${ratio}`}>
+              <line className="fundamental-grid-line" x1={margin.left} x2={chartWidth - margin.right} y1={y} y2={y} />
+            </g>
+          );
+        })}
+        {chartPoints.map((point, index) => {
+          if (index % labelStep !== 0 && index !== chartPoints.length - 1) {
+            return null;
+          }
+          const x = xScale(index);
+          return (
+            <g key={`grid-x-${point.period}`}>
+              <line className="fundamental-grid-line soft" x1={x} x2={x} y1={margin.top} y2={chartHeight - margin.bottom} />
+              <text className="fundamental-axis-label" x={x} y={chartHeight - 12} textAnchor="middle">
+                {point.period}
+              </text>
+            </g>
+          );
+        })}
+        <text className="fundamental-axis-label" x={margin.left - 10} y={margin.top + 4} textAnchor="end">
+          {formatOptionalChartNumber(yMax)}
+        </text>
+        <text className="fundamental-axis-label" x={margin.left - 10} y={chartHeight - margin.bottom} textAnchor="end">
+          {formatOptionalChartNumber(yMin)}
+        </text>
+        <path className="fundamental-line" d={path} fill="none" />
+        {validPoints.map((point) => (
+          <circle
+            key={`point-${point.period}`}
+            className={`fundamental-point${hoverIndex === point.index ? " active" : ""}`}
+            cx={xScale(point.index)}
+            cy={yScale(point.numericValue)}
+            r={hoverIndex === point.index ? 6 : 5}
+          />
         ))}
-      </div>
-      <div className={`fundamental-row fundamental-row-${cells.length}`}>
-        <span>
-          <strong>{title}</strong>
-        </span>
-        {cells.map(([label, value, tone = "constant-value"]) => (
-          <span key={`${title}-${label}`} className={tone}>
-            <strong>{value}</strong>
+        {hoveredPoint && hoveredPoint.numericValue !== null && (
+          <>
+            <line className="fundamental-crosshair" x1={hoveredX} x2={hoveredX} y1={margin.top} y2={chartHeight - margin.bottom} />
+            <line className="fundamental-crosshair" x1={margin.left} x2={chartWidth - margin.right} y1={hoveredY} y2={hoveredY} />
+          </>
+        )}
+      </svg>
+      {hoveredPoint && (
+        <div className="fundamental-tooltip">
+          <strong>{hoveredPoint.period}</strong>
+          <span>
+            {category.label} <b>{trendDisplayValue(hoveredPoint.value, category.key)}</b>
           </span>
-        ))}
-      </div>
+          {category.key === "eps" && (
+            <>
+              <span>單季 EPS YoY {formatOptionalSignedPercent(hoveredPoint.yoy_percent)}</span>
+              <span>TTM EPS YoY {formatOptionalSignedPercent(hoveredPoint.ttm_eps_yoy_percent)}</span>
+            </>
+          )}
+          {category.key === "monthly_revenue" && (
+            <>
+              <span>YoY {formatOptionalSignedPercent(hoveredPoint.yoy_percent)}</span>
+              <span>MoM {formatOptionalSignedPercent(hoveredPoint.mom_percent)}</span>
+            </>
+          )}
+          {category.key !== "eps" && category.key !== "monthly_revenue" && (
+            <span>SoS {formatOptionalSignedPercent(hoveredPoint.sos_percent)}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
