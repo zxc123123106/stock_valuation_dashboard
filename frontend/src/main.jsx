@@ -53,6 +53,7 @@ const MA_PERIODS = [5, 10, 20, 60, 120, 240];
 const MA_VISIBILITY_STORAGE_KEY = "stock-dashboard-visible-ma-lines";
 const AI_MODE_STORAGE_PREFIX = "stock-dashboard-ai-analysis-mode";
 const FUNDAMENTAL_CATEGORY_STORAGE_PREFIX = "stock-dashboard-fundamental-category";
+const FUTURES_DATA_GAP_THRESHOLD_MS = 30 * 60 * 1000;
 const FUNDAMENTAL_CATEGORY_KEYS = ["eps", "monthly_revenue", "gross_margin", "operating_margin", "net_margin"];
 const FUNDAMENTAL_CATEGORY_LABELS = {
   eps: "EPS",
@@ -1372,6 +1373,39 @@ function futuresAxisTicks(sessionStart, sessionEnd, sessionType) {
   return ticks;
 }
 
+function splitFuturesPointSegments(points) {
+  const segments = [];
+  const gaps = [];
+  let current = [];
+
+  for (const point of points) {
+    const previous = current[current.length - 1];
+    if (previous && point.timestamp - previous.timestamp > FUTURES_DATA_GAP_THRESHOLD_MS) {
+      segments.push(current);
+      gaps.push({
+        start: previous.timestamp,
+        end: point.timestamp,
+        minutes: Math.round((point.timestamp - previous.timestamp) / 60000),
+      });
+      current = [point];
+    } else {
+      current.push(point);
+    }
+  }
+
+  if (current.length) {
+    segments.push(current);
+  }
+
+  return { segments, gaps };
+}
+
+function futuresSegmentPath(segment, xScale, yScale) {
+  return segment
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${xScale(point.timestamp)} ${yScale(point.value)}`)
+    .join(" ");
+}
+
 function FuturesLineChart({ data }) {
   const containerRef = useRef(null);
   const [chartSize, setChartSize] = useState({ width: 760, height: 190 });
@@ -1444,9 +1478,7 @@ function FuturesLineChart({ data }) {
   const yMax = rawMax + padding;
   const xScale = (timestamp) => margin.left + ((timestamp - sessionStart) / (sessionEnd - sessionStart)) * innerWidth;
   const yScale = (value) => margin.top + ((yMax - value) / (yMax - yMin)) * innerHeight;
-  const path = linePoints
-    .map((point, index) => `${index === 0 ? "M" : "L"} ${xScale(point.timestamp)} ${yScale(point.value)}`)
-    .join(" ");
+  const { segments, gaps } = splitFuturesPointSegments(linePoints);
   const axisTicks = futuresAxisTicks(sessionStart, sessionEnd, data?.session_type);
   const zeroY = yScale(0);
   const selectedPoint = hoverPoint || null;
@@ -1513,13 +1545,59 @@ function FuturesLineChart({ data }) {
         {zeroY >= margin.top && zeroY <= height - margin.bottom && (
           <line className="futures-zero-line" x1={margin.left} x2={width - margin.right} y1={zeroY} y2={zeroY} />
         )}
+        {gaps.map((gap) => {
+          const gapX = Math.max(margin.left, xScale(gap.start));
+          const gapEndX = Math.min(width - margin.right, xScale(gap.end));
+          const gapWidth = Math.max(0, gapEndX - gapX);
+          if (gapWidth <= 0) {
+            return null;
+          }
+          return (
+            <g key={`${gap.start}-${gap.end}`}>
+              <rect
+                className="futures-gap-band"
+                x={gapX}
+                y={margin.top}
+                width={gapWidth}
+                height={innerHeight}
+              />
+              {gapWidth > 74 && (
+                <text
+                  className="futures-gap-label"
+                  x={gapX + gapWidth / 2}
+                  y={margin.top + 18}
+                  textAnchor="middle"
+                >
+                  資料中斷 {gap.minutes} 分
+                </text>
+              )}
+            </g>
+          );
+        })}
         <text className="futures-axis-label" x={margin.left - 8} y={margin.top + 5} textAnchor="end">
           {formatOptionalSignedPercent(yMax)}
         </text>
         <text className="futures-axis-label" x={margin.left - 8} y={height - margin.bottom} textAnchor="end">
           {formatOptionalSignedPercent(yMin)}
         </text>
-        <path className="futures-line" d={path} fill="none" />
+        {segments.map((segment, index) =>
+          segment.length > 1 ? (
+            <path
+              key={`segment-${index}`}
+              className="futures-line"
+              d={futuresSegmentPath(segment, xScale, yScale)}
+              fill="none"
+            />
+          ) : (
+            <circle
+              key={`segment-${index}`}
+              className="futures-point-marker"
+              cx={xScale(segment[0].timestamp)}
+              cy={yScale(segment[0].value)}
+              r="3.5"
+            />
+          ),
+        )}
         {selectedPoint && selectedX !== null && selectedY !== null && (
           <g className="futures-hover-layer">
             <line className="futures-hover-line" x1={selectedX} x2={selectedX} y1={margin.top} y2={height - margin.bottom} />

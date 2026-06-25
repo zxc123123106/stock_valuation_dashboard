@@ -139,6 +139,7 @@ class FuturesChartPointResponse(BaseModel):
     timestamp: datetime
     price: float
     difference_percent: float
+    source: str | None = None
 
 
 class FuturesWtxResponse(BaseModel):

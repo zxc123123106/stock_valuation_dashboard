@@ -27,6 +27,12 @@ TAIFEX_SOCKJS_URL = "wss://mis.taifex.com.tw/futures/rt/000/{session_id}/websock
 TAIFEX_CHART_DATA_URL = "https://mis.taifex.com.tw/futures/api/getChartData1M_mem"
 TAIFEX_ORIGIN = "https://mis.taifex.com.tw"
 TAIFEX_REFERER = "https://mis.taifex.com.tw/futures/"
+YAHOO_WTX_CHART_URL = (
+    "https://tw.stock.yahoo.com/_td-stock/api/resource/"
+    "FinanceChartService.ApacLibraCharts;symbols=%5B%22WTX%26%22%5D;type=tick"
+)
+YAHOO_WTX_REFERER = "https://tw.stock.yahoo.com/future/WTX%26"
+YAHOO_WTX_SOURCE = "Yahoo FinanceChartService.ApacLibraCharts WTX&"
 WTX_SYMBOL = "WTX&"
 WTX_NAME = "台指期近一"
 WTX_SOURCE = "TAIFEX MIS rtCore WTX&"
@@ -35,6 +41,8 @@ DAY_SESSION_END = time(13, 45)
 NIGHT_SESSION_START = time(15, 0)
 NIGHT_SESSION_END = time(5, 0)
 STALE_AFTER_SECONDS = 180
+BACKFILL_GAP_SECONDS = 120
+YAHOO_FALLBACK_MIN_INTERVAL_SECONDS = 60
 MONEY = Decimal("0.01")
 PERCENT = Decimal("0.01")
 
@@ -102,7 +110,11 @@ def refresh_wtx_futures_cache() -> FuturesQuoteSnapshot | None:
         snapshot = fetch_taifex_futures_quote(WTX_SYMBOL)
     except Exception as exc:
         _log_futures_failure(str(exc), started_at)
-        return None
+        try:
+            snapshot = fetch_yahoo_wtx_quote_snapshot()
+        except Exception as fallback_exc:
+            _log_futures_failure(f"Yahoo WTX snapshot fallback failed: {fallback_exc}", started_at)
+            return None
 
     with SessionLocal() as session:
         apply_futures_snapshot(session, snapshot)
@@ -154,12 +166,61 @@ def apply_futures_snapshot(session, snapshot: FuturesQuoteSnapshot, *, now: date
         row.fetched_at = now
         row.updated_at = now
 
+    _upsert_futures_intraday_point(
+        session,
+        snapshot=snapshot,
+        futures_session=futures_session,
+        session_date=session_date,
+        point_time=point_time,
+        price=snapshot.current_price,
+        difference_percent=snapshot.difference_percent,
+        source=snapshot.source,
+        now=now,
+    )
+
+    heartbeat_time = _as_utc(now).replace(second=0, microsecond=0)
+    quote_age_seconds = (_as_utc(now) - _as_utc(snapshot.price_updated_at)).total_seconds()
+    if (
+        fetch_session.session_type != "closed"
+        and heartbeat_time > _as_utc(point_time)
+        and 0 <= quote_age_seconds <= STALE_AFTER_SECONDS
+    ):
+        _upsert_futures_intraday_point(
+            session,
+            snapshot=snapshot,
+            futures_session=fetch_session,
+            session_date=fetch_session.session_date or session_date,
+            point_time=heartbeat_time,
+            price=snapshot.current_price,
+            difference_percent=snapshot.difference_percent,
+            source=f"{snapshot.source} heartbeat",
+            now=now,
+        )
+
+    cutoff = session_date - timedelta(days=14)
+    session.execute(delete(FuturesIntradayPoint).where(FuturesIntradayPoint.session_date < cutoff))
+    session.flush()
+
+
+def _upsert_futures_intraday_point(
+    session,
+    *,
+    snapshot: FuturesQuoteSnapshot,
+    futures_session: FuturesSession,
+    session_date: date,
+    point_time: datetime,
+    price: Decimal,
+    difference_percent: Decimal,
+    source: str,
+    now: datetime,
+) -> None:
+    normalized_time = _as_utc(point_time).replace(second=0, microsecond=0)
     point = session.scalar(
         select(FuturesIntradayPoint).where(
             FuturesIntradayPoint.symbol == snapshot.symbol,
             FuturesIntradayPoint.session_type == futures_session.session_type,
             FuturesIntradayPoint.session_date == session_date,
-            FuturesIntradayPoint.point_time == point_time,
+            FuturesIntradayPoint.point_time == normalized_time,
         )
     )
     if not point:
@@ -167,36 +228,66 @@ def apply_futures_snapshot(session, snapshot: FuturesQuoteSnapshot, *, now: date
             symbol=snapshot.symbol,
             session_type=futures_session.session_type,
             session_date=session_date,
-            point_time=point_time,
+            point_time=normalized_time,
         )
         session.add(point)
-    point.price = snapshot.current_price
+    point.price = price
     point.open_price = snapshot.open_price
-    point.difference_percent = snapshot.difference_percent
-    point.source = snapshot.source
+    point.difference_percent = difference_percent
+    point.source = source
     point.fetched_at = now
     point.updated_at = now
 
-    cutoff = session_date - timedelta(days=14)
-    session.execute(delete(FuturesIntradayPoint).where(FuturesIntradayPoint.session_date < cutoff))
-    session.flush()
-
 
 def backfill_futures_intraday_points(session, snapshot: FuturesQuoteSnapshot) -> int:
-    official_symbol = snapshot.source_symbol or _source_symbol_from_snapshot(snapshot)
-    if not official_symbol:
-        return 0
     fetch_session = current_futures_session(snapshot.price_updated_at)
     if fetch_session.session_type == "closed" or fetch_session.session_date is None:
         return 0
 
-    points = fetch_taifex_chart_points(
-        official_symbol,
-        session_type=fetch_session.session_type,
-        session_date=fetch_session.session_date,
-        open_price=snapshot.open_price,
-    )
-    return apply_futures_chart_points(session, snapshot, points, futures_session=fetch_session)
+    now = datetime.now(UTC)
+    count = 0
+    official_symbol = snapshot.source_symbol or _source_symbol_from_snapshot(snapshot)
+    if official_symbol and not (snapshot.source or "").startswith(YAHOO_WTX_SOURCE):
+        try:
+            points = fetch_taifex_chart_points(
+                official_symbol,
+                session_type=fetch_session.session_type,
+                session_date=fetch_session.session_date,
+                open_price=snapshot.open_price,
+            )
+            count += apply_futures_chart_points(
+                session,
+                snapshot,
+                points,
+                futures_session=fetch_session,
+                source=f"{WTX_SOURCE} chart ({official_symbol})",
+            )
+        except Exception as exc:
+            _record_futures_failure(
+                session,
+                f"WTX TAIFEX chart backfill failed: {exc}",
+                started_at=now,
+            )
+
+    if _futures_backfill_needed(session, fetch_session, now=now) and _yahoo_fallback_allowed(session, now=now):
+        try:
+            yahoo_points = fetch_yahoo_wtx_chart_points(snapshot.open_price)
+            count += apply_futures_chart_points(
+                session,
+                snapshot,
+                yahoo_points,
+                futures_session=fetch_session,
+                source=YAHOO_WTX_SOURCE,
+                overwrite_existing=False,
+            )
+        except Exception as exc:
+            _record_futures_failure(
+                session,
+                f"WTX Yahoo chart fallback failed: {exc}",
+                started_at=now,
+            )
+
+    return count
 
 
 def apply_futures_chart_points(
@@ -205,6 +296,8 @@ def apply_futures_chart_points(
     points: list[tuple[datetime, Decimal, Decimal]],
     *,
     futures_session: FuturesSession,
+    source: str | None = None,
+    overwrite_existing: bool = True,
     now: datetime | None = None,
 ) -> int:
     now = now or datetime.now(UTC)
@@ -214,8 +307,11 @@ def apply_futures_chart_points(
     normalized_points: dict[datetime, tuple[Decimal, Decimal]] = {}
     for point_time, price, difference_percent in points:
         normalized_time = _as_utc(point_time).replace(second=0, microsecond=0)
+        if not _time_matches_session(normalized_time, futures_session):
+            continue
         normalized_points[normalized_time] = (price, difference_percent)
 
+    point_source = source or f"{WTX_SOURCE} chart ({snapshot.source_symbol or _source_symbol_from_snapshot(snapshot) or snapshot.symbol})"
     count = 0
     for normalized_time, (price, difference_percent) in normalized_points.items():
         point = session.scalar(
@@ -226,6 +322,8 @@ def apply_futures_chart_points(
                 FuturesIntradayPoint.point_time == normalized_time,
             )
         )
+        if point and not overwrite_existing:
+            continue
         if not point:
             point = FuturesIntradayPoint(
                 symbol=snapshot.symbol,
@@ -237,7 +335,7 @@ def apply_futures_chart_points(
         point.price = price
         point.open_price = snapshot.open_price
         point.difference_percent = difference_percent
-        point.source = f"{WTX_SOURCE} chart ({snapshot.source_symbol or _source_symbol_from_snapshot(snapshot) or snapshot.symbol})"
+        point.source = point_source
         point.fetched_at = now
         point.updated_at = now
         count += 1
@@ -426,6 +524,138 @@ def fetch_taifex_chart_points(
     return parse_taifex_chart_ticks(ticks, session_type=session_type, session_date=session_date, open_price=open_price)
 
 
+def fetch_yahoo_wtx_chart_points(
+    open_price: Decimal,
+    timeout_seconds: int = 12,
+) -> list[tuple[datetime, Decimal, Decimal]]:
+    points = parse_yahoo_wtx_chart_payload(_fetch_yahoo_wtx_chart_payload(timeout_seconds), open_price=open_price)
+    if not points:
+        raise ValueError("Yahoo WTX chart returned no usable points.")
+    return points
+
+
+def fetch_yahoo_wtx_quote_snapshot(timeout_seconds: int = 12) -> FuturesQuoteSnapshot:
+    return parse_yahoo_wtx_quote_snapshot(_fetch_yahoo_wtx_chart_payload(timeout_seconds))
+
+
+def _fetch_yahoo_wtx_chart_payload(timeout_seconds: int) -> dict:
+    response = requests.get(
+        YAHOO_WTX_CHART_URL,
+        params={
+            "device": "desktop",
+            "ecma": "modern",
+            "intl": "tw",
+            "lang": "zh-Hant-TW",
+            "partner": "none",
+            "region": "TW",
+            "site": "finance",
+            "tz": "Asia/Taipei",
+            "ver": "1.4.886",
+            "returnMeta": "true",
+        },
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Referer": YAHOO_WTX_REFERER,
+            "User-Agent": "Mozilla/5.0",
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def parse_yahoo_wtx_quote_snapshot(payload: dict) -> FuturesQuoteSnapshot:
+    chart = _yahoo_chart_from_payload(payload)
+    meta = chart.get("meta") or {}
+    quote = (((chart.get("indicators") or {}).get("quote") or [{}])[0] or {})
+    timestamps = chart.get("timestamp") or []
+    closes = quote.get("close") or []
+    opens = quote.get("open") or []
+
+    current_price = _optional_decimal(meta.get("regularMarketPrice"))
+    price_updated_at: datetime | None = None
+    regular_market_time = meta.get("regularMarketTime")
+    if regular_market_time is not None:
+        try:
+            price_updated_at = datetime.fromtimestamp(int(regular_market_time), UTC)
+        except (TypeError, ValueError, OSError):
+            price_updated_at = None
+
+    if current_price is None:
+        for index in range(min(len(timestamps), len(closes)) - 1, -1, -1):
+            current_price = _optional_decimal(closes[index])
+            if current_price is None:
+                continue
+            try:
+                price_updated_at = datetime.fromtimestamp(int(timestamps[index]), UTC)
+            except (TypeError, ValueError, OSError):
+                price_updated_at = datetime.now(UTC)
+            break
+
+    open_price = None
+    if isinstance(opens, list):
+        for value in opens:
+            open_price = _optional_decimal(value)
+            if open_price is not None:
+                break
+
+    if current_price is None:
+        raise ValueError("Yahoo WTX chart has no current price.")
+    if open_price is None:
+        raise ValueError("Yahoo WTX chart has no open price.")
+
+    return FuturesQuoteSnapshot(
+        symbol=WTX_SYMBOL,
+        name=WTX_NAME,
+        current_price=current_price,
+        open_price=open_price,
+        price_updated_at=price_updated_at or datetime.now(UTC),
+        source=YAHOO_WTX_SOURCE,
+        source_symbol=WTX_SYMBOL,
+    )
+
+
+def parse_yahoo_wtx_chart_payload(
+    payload: dict,
+    *,
+    open_price: Decimal,
+) -> list[tuple[datetime, Decimal, Decimal]]:
+    chart = _yahoo_chart_from_payload(payload)
+    timestamps = chart.get("timestamp") or []
+    quote = (((chart.get("indicators") or {}).get("quote") or [{}])[0] or {})
+    closes = quote.get("close") or []
+    if not isinstance(timestamps, list) or not isinstance(closes, list):
+        raise ValueError("Yahoo WTX chart payload has invalid timestamp or close arrays.")
+
+    parsed: list[tuple[datetime, Decimal, Decimal]] = []
+    for index, timestamp in enumerate(timestamps):
+        if index >= len(closes):
+            break
+        close_price = _optional_decimal(closes[index])
+        if close_price is None:
+            continue
+        try:
+            point_time = datetime.fromtimestamp(int(timestamp), UTC).replace(second=0, microsecond=0)
+        except (TypeError, ValueError, OSError):
+            continue
+        difference_percent = Decimal("0.00")
+        if open_price > 0:
+            difference_percent = ((close_price - open_price) / open_price * Decimal("100")).quantize(
+                PERCENT,
+                rounding=ROUND_HALF_UP,
+            )
+        parsed.append((point_time, close_price, difference_percent))
+    return parsed
+
+
+def _yahoo_chart_from_payload(payload: dict) -> dict:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    chart = ((data or [{}])[0] or {}).get("chart") if isinstance(data, list) else None
+    if not isinstance(chart, dict):
+        raise ValueError("Yahoo WTX chart payload has no chart object.")
+    return chart
+
+
 def parse_taifex_chart_ticks(
     ticks: list,
     *,
@@ -494,6 +724,7 @@ def latest_wtx_response(limit: int = 900) -> dict:
                     "timestamp": _as_utc(point.point_time),
                     "price": float(point.price),
                     "difference_percent": float(point.difference_percent),
+                    "source": point.source,
                 }
                 for point in points
             ],
@@ -544,6 +775,79 @@ def _point_matches_session(point: FuturesIntradayPoint, session_type: str) -> bo
     if "(TXF" not in source:
         return True
     return source.endswith("-F)") if session_type == "day" else source.endswith("-M)")
+
+
+def _time_matches_session(point_time: datetime, futures_session: FuturesSession) -> bool:
+    start_at, end_at = futures_session_range(futures_session.session_type, futures_session.session_date)
+    if start_at is None or end_at is None:
+        return True
+    normalized_time = _as_utc(point_time)
+    return start_at <= normalized_time <= end_at
+
+
+def _futures_backfill_needed(
+    session,
+    futures_session: FuturesSession,
+    *,
+    now: datetime,
+    gap_seconds: int = BACKFILL_GAP_SECONDS,
+) -> bool:
+    if futures_session.session_type == "closed" or futures_session.session_date is None:
+        return False
+
+    start_at, end_at = futures_session_range(futures_session.session_type, futures_session.session_date)
+    if start_at is None or end_at is None:
+        return False
+
+    effective_end = min(_as_utc(now), end_at)
+    if effective_end <= start_at:
+        return False
+
+    point_times = [
+        _as_utc(point_time)
+        for point_time in session.scalars(
+            select(FuturesIntradayPoint.point_time)
+            .where(
+                FuturesIntradayPoint.symbol == WTX_SYMBOL,
+                FuturesIntradayPoint.session_type == futures_session.session_type,
+                FuturesIntradayPoint.session_date == futures_session.session_date,
+            )
+            .order_by(FuturesIntradayPoint.point_time.asc())
+        ).all()
+    ]
+    point_times = [point_time for point_time in point_times if start_at <= point_time <= end_at]
+    if not point_times:
+        return True
+
+    if (point_times[0] - start_at).total_seconds() > gap_seconds:
+        return True
+    for previous_time, current_time in zip(point_times, point_times[1:]):
+        if (current_time - previous_time).total_seconds() > gap_seconds:
+            return True
+
+    current_session = current_futures_session(now)
+    if (
+        current_session.session_type == futures_session.session_type
+        and current_session.session_date == futures_session.session_date
+        and (effective_end - point_times[-1]).total_seconds() > STALE_AFTER_SECONDS
+    ):
+        return True
+    return False
+
+
+def _yahoo_fallback_allowed(session, *, now: datetime) -> bool:
+    latest_fetched_at = session.scalar(
+        select(FuturesIntradayPoint.fetched_at)
+        .where(
+            FuturesIntradayPoint.symbol == WTX_SYMBOL,
+            FuturesIntradayPoint.source.like(f"{YAHOO_WTX_SOURCE}%"),
+        )
+        .order_by(FuturesIntradayPoint.fetched_at.desc())
+        .limit(1)
+    )
+    if latest_fetched_at is None:
+        return True
+    return (_as_utc(now) - _as_utc(latest_fetched_at)).total_seconds() >= YAHOO_FALLBACK_MIN_INTERVAL_SECONDS
 
 
 def _quote_datetime(values: dict) -> datetime:
@@ -638,15 +942,19 @@ def _is_stale(price_updated_at: datetime, now: datetime) -> bool:
 
 def _log_futures_failure(message: str, started_at: datetime) -> None:
     with SessionLocal() as session:
-        log_crawler_result(
-            session=session,
-            job_name=f"futures_refresh:{WTX_SYMBOL}",
-            status="FAILED",
-            message=message,
-            started_at=started_at,
-            finished_at=datetime.now(UTC),
-        )
+        _record_futures_failure(session, message, started_at=started_at)
         session.commit()
+
+
+def _record_futures_failure(session, message: str, *, started_at: datetime) -> None:
+    log_crawler_result(
+        session=session,
+        job_name=f"futures_refresh:{WTX_SYMBOL}",
+        status="FAILED",
+        message=message,
+        started_at=started_at,
+        finished_at=datetime.now(UTC),
+    )
 
 
 def _random_session_id(length: int = 8) -> str:

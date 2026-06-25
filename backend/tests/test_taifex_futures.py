@@ -18,6 +18,8 @@ from backend.app.taifex_futures import (
     official_txf_candidate_symbols,
     parse_taifex_chart_ticks,
     parse_taifex_quote_payload,
+    parse_yahoo_wtx_chart_payload,
+    parse_yahoo_wtx_quote_snapshot,
 )
 
 
@@ -160,6 +162,66 @@ class TaifexChartParserTest(unittest.TestCase):
         self.assertEqual(points[0][1], Decimal("46600.00"))
         self.assertEqual(points[0][2], Decimal("-0.84"))
 
+    def test_parses_yahoo_wtx_tick_chart_payload(self) -> None:
+        points = parse_yahoo_wtx_chart_payload(
+            {
+                "data": [
+                    {
+                        "chart": {
+                            "timestamp": [1782370800, 1782370860, 1782416160, 1782416220],
+                            "indicators": {
+                                "quote": [
+                                    {
+                                        "close": [None, 46495, 45653, None],
+                                    }
+                                ]
+                            },
+                        }
+                    }
+                ]
+            },
+            open_price=Decimal("46430.00"),
+        )
+
+        self.assertEqual(len(points), 2)
+        self.assertEqual(points[0][0].isoformat(), "2026-06-25T07:01:00+00:00")
+        self.assertEqual(points[0][1], Decimal("46495.00"))
+        self.assertEqual(points[0][2], Decimal("0.14"))
+        self.assertEqual(points[1][0].isoformat(), "2026-06-25T19:36:00+00:00")
+        self.assertEqual(points[1][1], Decimal("45653.00"))
+        self.assertEqual(points[1][2], Decimal("-1.67"))
+
+    def test_parses_yahoo_wtx_snapshot_from_chart_payload(self) -> None:
+        snapshot = parse_yahoo_wtx_quote_snapshot(
+            {
+                "data": [
+                    {
+                        "chart": {
+                            "meta": {
+                                "regularMarketPrice": 45653,
+                                "regularMarketTime": 1782416160,
+                            },
+                            "timestamp": [1782370800, 1782370860, 1782416160],
+                            "indicators": {
+                                "quote": [
+                                    {
+                                        "open": [None, 46430, 45653],
+                                        "close": [None, 46495, 45653],
+                                    }
+                                ]
+                            },
+                        }
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(snapshot.symbol, "WTX&")
+        self.assertEqual(snapshot.current_price, Decimal("45653.00"))
+        self.assertEqual(snapshot.open_price, Decimal("46430.00"))
+        self.assertEqual(snapshot.price_updated_at.isoformat(), "2026-06-25T19:36:00+00:00")
+        self.assertTrue(snapshot.source.startswith("Yahoo"))
+
 
 class TaifexCacheTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -167,7 +229,7 @@ class TaifexCacheTest(unittest.TestCase):
         Base.metadata.create_all(engine)
         self.Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
-    def test_upserts_one_intraday_point_per_minute(self) -> None:
+    def test_upserts_trade_and_heartbeat_points_per_minute(self) -> None:
         with self.Session() as session:
             apply_futures_snapshot(
                 session,
@@ -193,11 +255,43 @@ class TaifexCacheTest(unittest.TestCase):
             )
             session.commit()
 
-            points = session.scalars(select(FuturesIntradayPoint)).all()
+            points = session.scalars(
+                select(FuturesIntradayPoint).order_by(FuturesIntradayPoint.point_time.asc())
+            ).all()
 
-        self.assertEqual(len(points), 1)
+        self.assertEqual(len(points), 2)
+        self.assertEqual(points[0].point_time.isoformat(), "2026-06-23T13:53:00")
         self.assertEqual(points[0].price, Decimal("46575.00"))
         self.assertEqual(points[0].difference_percent, Decimal("1.93"))
+        self.assertEqual(points[1].point_time.isoformat(), "2026-06-23T13:54:00")
+        self.assertEqual(points[1].price, Decimal("46575.00"))
+        self.assertTrue(points[1].source.endswith("heartbeat"))
+
+    def test_skips_poll_time_heartbeat_when_quote_timestamp_is_stale(self) -> None:
+        with self.Session() as session:
+            apply_futures_snapshot(
+                session,
+                FuturesQuoteSnapshot(
+                    symbol="WTX&",
+                    name="台指期近一",
+                    current_price=Decimal("45717.00"),
+                    open_price=Decimal("46430.00"),
+                    price_updated_at=datetime(2026, 6, 25, 17, 59, tzinfo=UTC),
+                    source="TAIFEX MIS rtCore WTX& (TXFG6-M)",
+                    source_symbol="TXFG6-M",
+                ),
+                now=datetime(2026, 6, 25, 18, 49, tzinfo=UTC),
+            )
+            session.commit()
+
+            points = session.scalars(
+                select(FuturesIntradayPoint).order_by(FuturesIntradayPoint.point_time.asc())
+            ).all()
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0].point_time.isoformat(), "2026-06-25T17:59:00")
+        self.assertEqual(points[0].source, "TAIFEX MIS rtCore WTX& (TXFG6-M)")
+        self.assertEqual(points[0].price, Decimal("45717.00"))
 
     def test_upserts_backfilled_chart_points_per_minute(self) -> None:
         with self.Session() as session:
@@ -233,6 +327,52 @@ class TaifexCacheTest(unittest.TestCase):
         self.assertEqual(points[0].difference_percent, Decimal("-0.90"))
         self.assertEqual(points[1].point_time.isoformat(), "2026-06-25T01:17:00")
         self.assertEqual(points[1].price, Decimal("46580.00"))
+
+    def test_yahoo_fallback_fills_missing_points_without_overwriting_taifex_points(self) -> None:
+        with self.Session() as session:
+            snapshot = FuturesQuoteSnapshot(
+                symbol="WTX&",
+                name="台指期近一",
+                current_price=Decimal("45653.00"),
+                open_price=Decimal("46430.00"),
+                price_updated_at=datetime(2026, 6, 25, 19, 36, tzinfo=UTC),
+                source_symbol="TXFG6-M",
+            )
+            futures_session = FuturesSession("night", "夜盤", datetime(2026, 6, 25, tzinfo=UTC).date())
+            apply_futures_chart_points(
+                session,
+                snapshot,
+                [
+                    (datetime(2026, 6, 25, 7, 1, tzinfo=UTC), Decimal("46495.00"), Decimal("0.14")),
+                ],
+                futures_session=futures_session,
+                source="TAIFEX MIS rtCore WTX& chart (TXFG6-M)",
+                now=datetime(2026, 6, 25, 7, 2, tzinfo=UTC),
+            )
+            apply_futures_chart_points(
+                session,
+                snapshot,
+                [
+                    (datetime(2026, 6, 25, 7, 1, tzinfo=UTC), Decimal("46510.00"), Decimal("0.17")),
+                    (datetime(2026, 6, 25, 19, 36, tzinfo=UTC), Decimal("45653.00"), Decimal("-1.67")),
+                ],
+                futures_session=futures_session,
+                source="Yahoo FinanceChartService.ApacLibraCharts WTX&",
+                overwrite_existing=False,
+                now=datetime(2026, 6, 25, 19, 37, tzinfo=UTC),
+            )
+            session.commit()
+
+            points = session.scalars(
+                select(FuturesIntradayPoint).order_by(FuturesIntradayPoint.point_time.asc())
+            ).all()
+
+        self.assertEqual(len(points), 2)
+        self.assertEqual(points[0].price, Decimal("46495.00"))
+        self.assertTrue(points[0].source.startswith("TAIFEX"))
+        self.assertEqual(points[1].point_time.isoformat(), "2026-06-25T19:36:00")
+        self.assertEqual(points[1].price, Decimal("45653.00"))
+        self.assertTrue(points[1].source.startswith("Yahoo"))
 
 
 if __name__ == "__main__":
