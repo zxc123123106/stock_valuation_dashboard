@@ -302,3 +302,4 @@ class StockAIAnalysisResponse(BaseModel):
     symbol: str
     analyses: StockAIAnalysisModesResponse
     errors: dict[str, str] = Field(default_factory=dict)
+    running: dict[str, bool] = Field(default_factory=dict)

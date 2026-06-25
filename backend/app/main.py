@@ -4,7 +4,7 @@ import csv
 import io
 import json
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Response, status
@@ -97,6 +97,7 @@ refresh_manager = BackgroundRefreshManager(
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 MARKET_OPEN_TIME = time(9, 0)
 MARKET_CLOSE_TIME = time(14, 0)
+AI_ANALYSIS_INFLIGHT_TIMEOUT = timedelta(minutes=10)
 
 
 @asynccontextmanager
@@ -999,6 +1000,7 @@ def _ai_analysis_batch_response(
     symbol: str,
     results: dict[str, tuple[StockAIAnalysis, bool]],
     errors: dict[str, str] | None = None,
+    running: dict[str, bool] | None = None,
 ) -> StockAIAnalysisResponse:
     return StockAIAnalysisResponse(
         symbol=symbol,
@@ -1015,6 +1017,7 @@ def _ai_analysis_batch_response(
             ),
         ),
         errors=errors or {},
+        running=running or {},
     )
 
 
@@ -1116,13 +1119,71 @@ def _repairable_current_ai_cache_row(
     return next((candidate for candidate in candidates if _repair_ai_analysis_cache_row(session, candidate)), None)
 
 
+def _ai_analysis_is_fresh_inflight(row: StockAIAnalysis) -> bool:
+    if row.status not in {"queued", "running"}:
+        return False
+    updated_at = row.updated_at
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=UTC)
+    return datetime.now(UTC) - updated_at.astimezone(UTC) <= AI_ANALYSIS_INFLIGHT_TIMEOUT
+
+
+def _latest_ai_inflight_row(
+    session: Session,
+    stock: Stock,
+    provider_id: str,
+    model: str,
+    analysis_mode: str,
+) -> StockAIAnalysis | None:
+    candidates = session.scalars(
+        select(StockAIAnalysis)
+        .where(
+            StockAIAnalysis.stock_id == stock.id,
+            StockAIAnalysis.provider == provider_id,
+            StockAIAnalysis.model == model,
+            StockAIAnalysis.analysis_mode == analysis_mode,
+            StockAIAnalysis.prompt_version == PROMPT_VERSION,
+            StockAIAnalysis.status.in_(("queued", "running")),
+        )
+        .order_by(StockAIAnalysis.updated_at.desc())
+        .limit(5)
+    ).all()
+    return next((candidate for candidate in candidates if _ai_analysis_is_fresh_inflight(candidate)), None)
+
+
+def _current_ai_inflight_row(
+    session: Session,
+    stock: Stock,
+    provider,
+    analysis_mode: str,
+    analysis_date: date,
+    input_hash: str,
+) -> StockAIAnalysis | None:
+    candidates = session.scalars(
+        select(StockAIAnalysis)
+        .where(
+            StockAIAnalysis.stock_id == stock.id,
+            StockAIAnalysis.provider == provider.provider_id,
+            StockAIAnalysis.model == provider.model,
+            StockAIAnalysis.analysis_mode == analysis_mode,
+            StockAIAnalysis.prompt_version == PROMPT_VERSION,
+            StockAIAnalysis.analysis_date == analysis_date,
+            StockAIAnalysis.input_hash == input_hash,
+            StockAIAnalysis.status.in_(("queued", "running")),
+        )
+        .order_by(StockAIAnalysis.updated_at.desc())
+        .limit(5)
+    ).all()
+    return next((candidate for candidate in candidates if _ai_analysis_is_fresh_inflight(candidate)), None)
+
+
 def _generate_ai_mode(
     session: Session,
     stock: Stock,
     provider,
     analysis_mode: str,
     force_refresh: bool,
-) -> tuple[StockAIAnalysis | None, bool, str | None]:
+) -> tuple[StockAIAnalysis | None, bool, str | None, bool]:
     stock_summary = _ai_stock_summary(stock, session, analysis_mode)
     analysis_date = datetime.now(TAIPEI_TZ).date()
     row, input_hash = _current_ai_cache_row(
@@ -1133,8 +1194,11 @@ def _generate_ai_mode(
         stock_summary,
         analysis_date,
     )
+    inflight_row = _current_ai_inflight_row(session, stock, provider, analysis_mode, analysis_date, input_hash)
+    if inflight_row is not None:
+        return None, False, "AI 分析正在處理中，完成後會自動讀取快取。", True
     if row and _ai_analysis_is_cacheable(row) and not force_refresh:
-        return row, True, None
+        return row, True, None, False
     if not force_refresh:
         repaired_row = _repairable_current_ai_cache_row(
             session,
@@ -1145,7 +1209,7 @@ def _generate_ai_mode(
             input_hash,
         )
         if repaired_row is not None:
-            return repaired_row, True, None
+            return repaired_row, True, None, False
     row = None
 
     request_payload_json = json.dumps(stock_summary, ensure_ascii=False, sort_keys=True)
@@ -1160,9 +1224,11 @@ def _generate_ai_mode(
             input_hash=input_hash,
             request_payload_json=request_payload_json,
             response_json="{}",
-            status="queued",
+            status="running",
         )
         session.add(row)
+        session.commit()
+        session.refresh(row)
 
     try:
         provider_result = provider.analyze_stock(stock_summary, analysis_mode)
@@ -1177,7 +1243,7 @@ def _generate_ai_mode(
         row.error_message = str(exc)
         row.updated_at = now
         session.commit()
-        return None, False, str(exc)
+        return None, False, str(exc), False
 
     now = datetime.now(UTC)
     row.request_payload_json = request_payload_json
@@ -1191,8 +1257,8 @@ def _generate_ai_mode(
     session.commit()
     session.refresh(row)
     if not provider_result.analysis.format_valid:
-        return None, False, "AI 回覆未通過格式或內容驗證，已保留 Log 供後續檢查。"
-    return row, False, None
+        return None, False, "AI 回覆未通過格式或內容驗證，已保留 Log 供後續檢查。", False
+    return row, False, None, False
 
 
 def _json_field(value: str | None):
@@ -1400,12 +1466,18 @@ def get_latest_stock_ai_analysis(
         for mode in modes
         if (row := _latest_ai_cache_row(session, stock, provider_id, model, mode)) is not None
     }
-    return _ai_analysis_batch_response(stock.symbol, results)
+    running = {
+        mode.lower(): True
+        for mode in modes
+        if _latest_ai_inflight_row(session, stock, provider_id, model, mode) is not None
+    }
+    return _ai_analysis_batch_response(stock.symbol, results, running=running)
 
 
 @app.post("/api/stocks/{symbol}/ai-analysis", response_model=StockAIAnalysisResponse)
 def create_stock_ai_analysis(
     symbol: str,
+    response: Response,
     payload: StockAIAnalysisRequest = Body(default_factory=StockAIAnalysisRequest),
     session: Session = Depends(get_session),
 ) -> StockAIAnalysisResponse:
@@ -1428,8 +1500,9 @@ def create_stock_ai_analysis(
 
     results: dict[str, tuple[StockAIAnalysis, bool]] = {}
     errors: dict[str, str] = {}
+    running: dict[str, bool] = {}
     for mode in modes:
-        row, cached, error = _generate_ai_mode(
+        row, cached, error, is_running = _generate_ai_mode(
             session,
             stock,
             ai_provider,
@@ -1439,13 +1512,20 @@ def create_stock_ai_analysis(
         key = mode.lower()
         if row is not None:
             results[mode] = (row, cached)
+        elif is_running:
+            running[key] = True
         elif error:
             errors[key] = error
 
     if not results:
+        if running:
+            response.status_code = status.HTTP_202_ACCEPTED
+            return _ai_analysis_batch_response(stock.symbol, results, errors, running)
         details = "；".join(f"{mode}: {message}" for mode, message in errors.items())
         raise HTTPException(status_code=502, detail=details or "AI analysis failed.")
-    return _ai_analysis_batch_response(stock.symbol, results, errors)
+    if running:
+        response.status_code = status.HTTP_202_ACCEPTED
+    return _ai_analysis_batch_response(stock.symbol, results, errors, running)
 
 
 @app.get("/api/ai-analysis/logs/export")

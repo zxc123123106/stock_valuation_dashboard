@@ -382,6 +382,7 @@ function App() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [now, setNow] = useState(() => new Date());
+  const [aiAnalysisPendingBySymbol, setAiAnalysisPendingBySymbol] = useState({});
 
   const reorderingRef = useRef(false);
   const autoScrollFrameRef = useRef(0);
@@ -475,6 +476,20 @@ function App() {
         block: "center",
         behavior: "smooth",
       });
+    });
+  }, []);
+
+  const setAiAnalysisPending = useCallback((symbol, pending) => {
+    setAiAnalysisPendingBySymbol((current) => {
+      if (pending) {
+        return { ...current, [symbol]: true };
+      }
+      if (!current[symbol]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[symbol];
+      return next;
     });
   }, []);
 
@@ -911,6 +926,8 @@ function App() {
                     showRefreshState={isVisibleRefreshState(state, now)}
                     sortingDisabled={reordering || isPendingRefresh(state)}
                     actionDisabled={reordering}
+                    aiAnalysisPending={Boolean(aiAnalysisPendingBySymbol[stock.symbol])}
+                    onAiAnalysisPendingChange={(pending) => setAiAnalysisPending(stock.symbol, pending)}
                     onRegisterRef={registerStockCard}
                     onMoveUp={() => moveStock(stock.symbol, -1)}
                     onMoveDown={() => moveStock(stock.symbol, 1)}
@@ -931,6 +948,8 @@ function App() {
                   overlay
                   sortingDisabled
                   actionDisabled
+                  aiAnalysisPending={Boolean(aiAnalysisPendingBySymbol[activeStock.symbol])}
+                  onAiAnalysisPendingChange={() => {}}
                   canMoveUp={false}
                   canMoveDown={false}
                   onMoveUp={() => {}}
@@ -974,6 +993,8 @@ function SortableStockCard({
   onDelete,
   onSavePosition,
   onClearPosition,
+  aiAnalysisPending,
+  onAiAnalysisPendingChange,
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: stock.symbol,
@@ -1000,6 +1021,8 @@ function SortableStockCard({
       dragging={isDragging}
       sortingDisabled={sortingDisabled}
       actionDisabled={actionDisabled}
+      aiAnalysisPending={aiAnalysisPending}
+      onAiAnalysisPendingChange={onAiAnalysisPendingChange}
       canMoveUp={index > 0}
       canMoveDown={index < total - 1}
       dragAttributes={attributes}
@@ -1033,6 +1056,8 @@ const StockCard = React.forwardRef(function StockCard(
     onDelete,
     onSavePosition,
     onClearPosition,
+    aiAnalysisPending = false,
+    onAiAnalysisPendingChange = () => {},
     style,
   },
   ref,
@@ -1271,6 +1296,8 @@ const StockCard = React.forwardRef(function StockCard(
         open={aiAnalysisOpen}
         anchorRef={aiButtonRef}
         onClose={() => setAiAnalysisOpen(false)}
+        analysisPending={aiAnalysisPending}
+        onAnalysisPendingChange={onAiAnalysisPendingChange}
       />
     </article>
   );
@@ -1816,14 +1843,75 @@ function loadAiMode(symbol, hasPosition) {
   return hasPosition ? "HELD" : "UNHELD";
 }
 
-function AIAnalysisPopover({ stock, open, anchorRef, onClose }) {
+function hasRunningAiAnalysis(response) {
+  return Boolean(response?.running?.unheld || response?.running?.held);
+}
+
+function mergeAiAnalysisResponse(current, next) {
+  if (!current || !next) {
+    return next;
+  }
+  return {
+    ...next,
+    analyses: {
+      unheld: next.analyses?.unheld || current.analyses?.unheld || null,
+      held: next.analyses?.held || current.analyses?.held || null,
+    },
+  };
+}
+
+function AIAnalysisPopover({
+  stock,
+  open,
+  anchorRef,
+  onClose,
+  analysisPending = false,
+  onAnalysisPendingChange = () => {},
+}) {
   const hasPosition = Boolean(stock.position);
   const panelRef = useRef(null);
+  const generationActiveRef = useRef(false);
   const [analysisResponse, setAnalysisResponse] = useState(null);
   const [activeMode, setActiveMode] = useState(() => loadAiMode(stock.symbol, hasPosition));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [panelStyle, setPanelStyle] = useState({});
+
+  const loadLatestAnalysis = useCallback(
+    async ({ signal, showLoading = false } = {}) => {
+      if (showLoading) {
+        setLoading(true);
+      }
+      setError("");
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/stocks/${stock.symbol}/ai-analysis/latest`, {
+          signal,
+        });
+        if (!response.ok) {
+          throw new Error(await parseError(response));
+        }
+        const payload = await response.json();
+        setAnalysisResponse((current) => mergeAiAnalysisResponse(current, payload));
+        const running = hasRunningAiAnalysis(payload);
+        if (running) {
+          onAnalysisPendingChange(true);
+        } else if (!generationActiveRef.current) {
+          onAnalysisPendingChange(false);
+        }
+        return payload;
+      } catch (requestError) {
+        if (requestError.name !== "AbortError") {
+          setError(requestError.message);
+        }
+        return null;
+      } finally {
+        if (!signal?.aborted && showLoading) {
+          setLoading(false);
+        }
+      }
+    },
+    [onAnalysisPendingChange, stock.symbol],
+  );
 
   useEffect(() => {
     setAnalysisResponse(null);
@@ -1850,30 +1938,19 @@ function AIAnalysisPopover({ stock, open, anchorRef, onClose }) {
       return undefined;
     }
     const controller = new AbortController();
-    async function loadLatest() {
-      setLoading(true);
-      setError("");
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/stocks/${stock.symbol}/ai-analysis/latest`, {
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          throw new Error(await parseError(response));
-        }
-        setAnalysisResponse(await response.json());
-      } catch (requestError) {
-        if (requestError.name !== "AbortError") {
-          setError(requestError.message);
-        }
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-        }
-      }
-    }
-    loadLatest();
+    loadLatestAnalysis({ signal: controller.signal, showLoading: true });
     return () => controller.abort();
-  }, [open, stock.symbol]);
+  }, [loadLatestAnalysis, open, stock.symbol]);
+
+  useEffect(() => {
+    if (!analysisPending && !hasRunningAiAnalysis(analysisResponse)) {
+      return undefined;
+    }
+    const intervalId = window.setInterval(() => {
+      loadLatestAnalysis();
+    }, 3000);
+    return () => window.clearInterval(intervalId);
+  }, [analysisPending, analysisResponse, loadLatestAnalysis]);
 
   useEffect(() => {
     if (!open) {
@@ -1935,6 +2012,11 @@ function AIAnalysisPopover({ stock, open, anchorRef, onClose }) {
   }, [anchorRef, onClose, open]);
 
   async function generateAnalysis() {
+    if (analysisPending || hasRunningAiAnalysis(analysisResponse)) {
+      return;
+    }
+    generationActiveRef.current = true;
+    onAnalysisPendingChange(true);
     setLoading(true);
     setError("");
     try {
@@ -1949,10 +2031,16 @@ function AIAnalysisPopover({ stock, open, anchorRef, onClose }) {
       if (!response.ok) {
         throw new Error(await parseError(response));
       }
-      setAnalysisResponse(await response.json());
+      const payload = await response.json();
+      setAnalysisResponse((current) => mergeAiAnalysisResponse(current, payload));
+      if (!hasRunningAiAnalysis(payload)) {
+        onAnalysisPendingChange(false);
+      }
     } catch (requestError) {
       setError(requestError.message);
+      onAnalysisPendingChange(false);
     } finally {
+      generationActiveRef.current = false;
       setLoading(false);
     }
   }
@@ -1966,6 +2054,7 @@ function AIAnalysisPopover({ stock, open, anchorRef, onClose }) {
   const analysis = result?.analysis;
   const modeError = analysisResponse?.errors?.[modeKey];
   const hasAnyAnalysis = Boolean(analysisResponse?.analyses?.unheld || analysisResponse?.analyses?.held);
+  const running = analysisPending || hasRunningAiAnalysis(analysisResponse);
 
   return createPortal(
     <section
@@ -2012,10 +2101,10 @@ function AIAnalysisPopover({ stock, open, anchorRef, onClose }) {
             className="text-button ai-analysis-button"
             type="button"
             onClick={generateAnalysis}
-            disabled={loading}
+            disabled={loading || running}
           >
-            {loading ? <Loader2 className="spin" size={15} /> : <Sparkles size={15} />}
-            {hasAnyAnalysis ? "更新分析" : "產生分析"}
+            {loading || running ? <Loader2 className="spin" size={15} /> : <Sparkles size={15} />}
+            {running ? "分析處理中" : hasAnyAnalysis ? "更新分析" : "產生分析"}
           </button>
         </div>
         {(error || modeError) && (
@@ -2024,10 +2113,10 @@ function AIAnalysisPopover({ stock, open, anchorRef, onClose }) {
             {modeError || error}
           </div>
         )}
-        {loading && !analysis ? (
+        {(loading || running) && !analysis ? (
           <div className="ai-analysis-empty">
             <Loader2 className="spin" size={15} />
-            AI 分析處理中
+            未持有與持有中分析處理中
           </div>
         ) : analysis ? (
           <>

@@ -15,6 +15,7 @@ from backend.app.ai_analysis import (
     stock_summary_hash,
 )
 from backend.app.main import _ai_analysis_is_cacheable, _ai_stock_summary
+from backend.app.main import _ai_analysis_is_fresh_inflight
 
 
 class AIAnalysisTest(unittest.TestCase):
@@ -139,6 +140,15 @@ class AIAnalysisTest(unittest.TestCase):
         )
 
         self.assertTrue(_ai_analysis_is_cacheable(row))
+
+    def test_fresh_running_analysis_is_inflight_but_stale_running_is_not(self) -> None:
+        fresh = SimpleNamespace(status="running", updated_at=datetime.now(UTC))
+        stale = SimpleNamespace(status="running", updated_at=datetime(2026, 1, 1, tzinfo=UTC))
+        success = SimpleNamespace(status="success", updated_at=datetime.now(UTC))
+
+        self.assertTrue(_ai_analysis_is_fresh_inflight(fresh))
+        self.assertFalse(_ai_analysis_is_fresh_inflight(stale))
+        self.assertFalse(_ai_analysis_is_fresh_inflight(success))
 
     def test_analysis_with_only_sanitization_warnings_is_cacheable(self) -> None:
         row = SimpleNamespace(
