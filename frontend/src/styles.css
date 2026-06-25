@@ -380,10 +380,89 @@ h1 {
 
 .futures-chart {
   width: 100%;
-  height: 180px;
+  height: 230px;
+  margin-top: 12px;
   overflow: hidden;
   border-top: 1px solid var(--line-soft);
-  padding-top: 12px;
+  cursor: crosshair;
+}
+
+.futures-svg-chart {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.futures-grid-line {
+  stroke: rgba(226, 200, 121, 0.13);
+  stroke-width: 1;
+}
+
+.futures-grid-line.soft {
+  stroke: rgba(226, 200, 121, 0.09);
+}
+
+.futures-zero-line {
+  stroke: rgba(226, 200, 121, 0.34);
+  stroke-dasharray: 4 4;
+  stroke-width: 1;
+}
+
+.futures-axis-label {
+  fill: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.futures-line {
+  stroke: var(--gold-strong);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.5;
+}
+
+.futures-hover-line {
+  stroke: rgba(244, 240, 232, 0.36);
+  stroke-dasharray: 4 4;
+  stroke-width: 1;
+}
+
+.futures-hover-marker {
+  fill: var(--gold-strong);
+  stroke: var(--bg);
+  stroke-width: 2;
+}
+
+.futures-tooltip-box {
+  fill: rgba(16, 16, 15, 0.94);
+  stroke: rgba(226, 200, 121, 0.35);
+  stroke-width: 1;
+}
+
+.futures-tooltip-label {
+  fill: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.futures-tooltip-value {
+  fill: var(--gold-strong);
+  font-size: 18px;
+  font-weight: 850;
+}
+
+.futures-tooltip-positive,
+.futures-tooltip-negative {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.futures-tooltip-positive {
+  fill: var(--danger);
+}
+
+.futures-tooltip-negative {
+  fill: var(--success);
 }
 
 .futures-chart.empty-chart {
@@ -1603,7 +1682,7 @@ footer a {
   }
 
   .futures-chart {
-    height: 150px;
+    height: 190px;
   }
 
   .stock-metrics {

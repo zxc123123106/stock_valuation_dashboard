@@ -10,10 +10,13 @@ from sqlalchemy.orm import sessionmaker
 from backend.app.database import Base, FuturesIntradayPoint
 from backend.app.taifex_futures import (
     FuturesQuoteSnapshot,
+    FuturesSession,
+    apply_futures_chart_points,
     apply_futures_snapshot,
     current_futures_session,
     futures_session_range,
     official_txf_candidate_symbols,
+    parse_taifex_chart_ticks,
     parse_taifex_quote_payload,
 )
 
@@ -127,6 +130,35 @@ class TaifexQuoteParserTest(unittest.TestCase):
         self.assertEqual(snapshot.symbol, "WTX&")
         self.assertEqual(snapshot.current_price, Decimal("46944.00"))
         self.assertEqual(snapshot.open_price, Decimal("46940.00"))
+        self.assertEqual(snapshot.source_symbol, "TXFG6-M")
+
+
+class TaifexChartParserTest(unittest.TestCase):
+    def test_parses_day_chart_ticks_as_taipei_session_minutes(self) -> None:
+        points = parse_taifex_chart_ticks(
+            [["091600", "46552.00", "46572.00", "46491.00", "46561.00", "477"]],
+            session_type="day",
+            session_date=datetime(2026, 6, 25, tzinfo=UTC).date(),
+            open_price=Decimal("46993.00"),
+        )
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0][0].isoformat(), "2026-06-25T01:16:00+00:00")
+        self.assertEqual(points[0][1], Decimal("46561.00"))
+        self.assertEqual(points[0][2], Decimal("-0.92"))
+
+    def test_parses_after_midnight_night_chart_ticks_on_next_calendar_day(self) -> None:
+        points = parse_taifex_chart_ticks(
+            [["003000", "46600.00", "46600.00", "46600.00", "46600.00", "12"]],
+            session_type="night",
+            session_date=datetime(2026, 6, 24, tzinfo=UTC).date(),
+            open_price=Decimal("46993.00"),
+        )
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0][0].isoformat(), "2026-06-24T16:30:00+00:00")
+        self.assertEqual(points[0][1], Decimal("46600.00"))
+        self.assertEqual(points[0][2], Decimal("-0.84"))
 
 
 class TaifexCacheTest(unittest.TestCase):
@@ -166,6 +198,41 @@ class TaifexCacheTest(unittest.TestCase):
         self.assertEqual(len(points), 1)
         self.assertEqual(points[0].price, Decimal("46575.00"))
         self.assertEqual(points[0].difference_percent, Decimal("1.93"))
+
+    def test_upserts_backfilled_chart_points_per_minute(self) -> None:
+        with self.Session() as session:
+            snapshot = FuturesQuoteSnapshot(
+                symbol="WTX&",
+                name="台指期近一",
+                current_price=Decimal("46600.00"),
+                open_price=Decimal("46993.00"),
+                price_updated_at=datetime(2026, 6, 25, 1, 20, tzinfo=UTC),
+                source_symbol="TXFG6-F",
+            )
+            futures_session = FuturesSession("day", "日盤", datetime(2026, 6, 25, tzinfo=UTC).date())
+            apply_futures_chart_points(
+                session,
+                snapshot,
+                [
+                    (datetime(2026, 6, 25, 1, 16, tzinfo=UTC), Decimal("46561.00"), Decimal("-0.92")),
+                    (datetime(2026, 6, 25, 1, 16, 30, tzinfo=UTC), Decimal("46570.00"), Decimal("-0.90")),
+                    (datetime(2026, 6, 25, 1, 17, tzinfo=UTC), Decimal("46580.00"), Decimal("-0.88")),
+                ],
+                futures_session=futures_session,
+                now=datetime(2026, 6, 25, 1, 21, tzinfo=UTC),
+            )
+            session.commit()
+
+            points = session.scalars(
+                select(FuturesIntradayPoint).order_by(FuturesIntradayPoint.point_time.asc())
+            ).all()
+
+        self.assertEqual(len(points), 2)
+        self.assertEqual(points[0].point_time.isoformat(), "2026-06-25T01:16:00")
+        self.assertEqual(points[0].price, Decimal("46570.00"))
+        self.assertEqual(points[0].difference_percent, Decimal("-0.90"))
+        self.assertEqual(points[1].point_time.isoformat(), "2026-06-25T01:17:00")
+        self.assertEqual(points[1].price, Decimal("46580.00"))
 
 
 if __name__ == "__main__":

@@ -296,7 +296,12 @@ function formatTaipeiTime(value) {
   if (value === null || value === undefined) {
     return "";
   }
-  const timestamp = typeof value === "number" ? value * 1000 : new Date(value).getTime();
+  const timestamp =
+    typeof value === "number"
+      ? value > 10_000_000_000
+        ? value
+        : value * 1000
+      : new Date(value).getTime();
   return new Intl.DateTimeFormat("zh-TW", {
     hour: "2-digit",
     minute: "2-digit",
@@ -1323,95 +1328,56 @@ function FuturesTrackerCard({ data }) {
   );
 }
 
+function futuresAxisTicks(sessionStart, sessionEnd, sessionType) {
+  if (!sessionStart || !sessionEnd || sessionEnd <= sessionStart) {
+    return [];
+  }
+  const stepMs = (sessionType === "night" ? 2 : 1) * 60 * 60 * 1000;
+  const ticks = [sessionStart];
+  let next = sessionStart + stepMs;
+  while (next < sessionEnd - 60_000) {
+    ticks.push(next);
+    next += stepMs;
+  }
+  if (ticks[ticks.length - 1] !== sessionEnd) {
+    ticks.push(sessionEnd);
+  }
+  return ticks;
+}
+
 function FuturesLineChart({ data }) {
   const containerRef = useRef(null);
+  const [chartSize, setChartSize] = useState({ width: 760, height: 190 });
+  const [hoverPoint, setHoverPoint] = useState(null);
   const points = data?.chart_points || [];
+  const sessionStart = data?.session_start_at ? new Date(data.session_start_at).getTime() : null;
+  const sessionEnd = data?.session_end_at ? new Date(data.session_end_at).getTime() : null;
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || !points.length) {
+    if (!container) {
       return undefined;
     }
-
-    const chart = createChart(container, {
-      autoSize: true,
-      layout: {
-        background: { color: "#111110" },
-        textColor: "#9f988d",
-        attributionLogo: false,
-      },
-      localization: {
-        timeFormatter: formatTaipeiTime,
-      },
-      grid: {
-        vertLines: { color: "rgba(226, 200, 121, 0.06)" },
-        horzLines: { color: "rgba(226, 200, 121, 0.06)" },
-      },
-      rightPriceScale: { borderColor: "rgba(226, 200, 121, 0.16)" },
-      timeScale: {
-        borderColor: "rgba(226, 200, 121, 0.16)",
-        timeVisible: true,
-        secondsVisible: false,
-        rightOffset: 0,
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        tickMarkFormatter: formatTaipeiTime,
-      },
-      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
-      handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
-    });
-
-    const sessionStart = data?.session_start_at
-      ? Math.floor(new Date(data.session_start_at).getTime() / 1000)
-      : null;
-    const sessionEnd = data?.session_end_at ? Math.floor(new Date(data.session_end_at).getTime() / 1000) : null;
-    const lineData = points
-      .map((point) => ({
-        time: Math.floor(new Date(point.timestamp).getTime() / 1000),
-        value: point.difference_percent,
-      }))
-      .sort((left, right) => left.time - right.time);
-
-    const spacerData = [];
-    if (sessionStart !== null && sessionEnd !== null && lineData.length) {
-      const spacerValue = lineData[0].value;
-      for (let time = sessionStart; time <= sessionEnd; time += 60) {
-        spacerData.push({ time, value: spacerValue });
+    const updateSize = () => {
+      const rect = container.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setChartSize({
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        });
       }
+    };
+    updateSize();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateSize);
+      return () => window.removeEventListener("resize", updateSize);
     }
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [points.length]);
 
-    if (spacerData.length) {
-      const spacerSeries = chart.addSeries(LineSeries, {
-        color: "rgba(226, 200, 121, 0)",
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        crosshairMarkerVisible: false,
-      });
-      spacerSeries.setData(spacerData);
-    }
-
-    const lineSeries = chart.addSeries(LineSeries, {
-      color: "#e2c879",
-      lineWidth: 2,
-      priceLineVisible: false,
-      lastValueVisible: true,
-      crosshairMarkerVisible: true,
-    });
-    lineSeries.setData(lineData);
-    if (spacerData.length > 1) {
-      chart.timeScale().setVisibleLogicalRange({
-        from: 0,
-        to: spacerData.length - 1,
-      });
-    } else {
-      chart.timeScale().fitContent();
-    }
-
-    return () => chart.remove();
-  }, [data?.session_end_at, data?.session_start_at, points]);
-
-  if (!points.length) {
+  if (!points.length || sessionStart === null || sessionEnd === null || sessionEnd <= sessionStart) {
     return (
       <div className="futures-chart empty-chart">
         <Wifi size={15} />
@@ -1420,7 +1386,137 @@ function FuturesLineChart({ data }) {
     );
   }
 
-  return <div className="futures-chart" ref={containerRef} />;
+  const width = Math.max(320, chartSize.width || 760);
+  const height = Math.max(170, chartSize.height || 190);
+  const margin = { top: 18, right: 22, bottom: 32, left: 52 };
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = height - margin.top - margin.bottom;
+  const linePoints = points
+    .map((point) => ({
+      timestamp: new Date(point.timestamp).getTime(),
+      value: Number(point.difference_percent),
+      price: Number(point.price),
+    }))
+    .filter((point) => Number.isFinite(point.timestamp) && Number.isFinite(point.value) && Number.isFinite(point.price))
+    .sort((left, right) => left.timestamp - right.timestamp);
+
+  if (!linePoints.length) {
+    return (
+      <div className="futures-chart empty-chart">
+        <Wifi size={15} />
+        當盤圖表待更新
+      </div>
+    );
+  }
+
+  const values = linePoints.map((point) => point.value);
+  const rawMin = Math.min(...values, 0);
+  const rawMax = Math.max(...values, 0);
+  const padding = rawMin === rawMax ? 0.2 : (rawMax - rawMin) * 0.15;
+  const yMin = rawMin - padding;
+  const yMax = rawMax + padding;
+  const xScale = (timestamp) => margin.left + ((timestamp - sessionStart) / (sessionEnd - sessionStart)) * innerWidth;
+  const yScale = (value) => margin.top + ((yMax - value) / (yMax - yMin)) * innerHeight;
+  const path = linePoints
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${xScale(point.timestamp)} ${yScale(point.value)}`)
+    .join(" ");
+  const axisTicks = futuresAxisTicks(sessionStart, sessionEnd, data?.session_type);
+  const zeroY = yScale(0);
+  const selectedPoint = hoverPoint || null;
+  const selectedX = selectedPoint ? xScale(selectedPoint.timestamp) : null;
+  const selectedY = selectedPoint ? yScale(selectedPoint.value) : null;
+  const selectedDifference =
+    selectedPoint && data?.open_price ? selectedPoint.price - Number(data.open_price) : null;
+  const tooltipWidth = 188;
+  const tooltipHeight = 70;
+  const tooltipX =
+    selectedX === null ? 0 : Math.min(Math.max(selectedX + 12, margin.left), width - tooltipWidth - margin.right);
+  const tooltipY =
+    selectedY === null ? 0 : Math.min(Math.max(selectedY - tooltipHeight - 12, margin.top), height - tooltipHeight - margin.bottom);
+
+  const updateHoverPoint = (clientX, target) => {
+    const rect = target.getBoundingClientRect();
+    const svgX = ((clientX - rect.left) / rect.width) * width;
+    let nearest = linePoints[0];
+    let nearestDistance = Math.abs(xScale(nearest.timestamp) - svgX);
+    for (const point of linePoints) {
+      const distance = Math.abs(xScale(point.timestamp) - svgX);
+      if (distance < nearestDistance) {
+        nearest = point;
+        nearestDistance = distance;
+      }
+    }
+    setHoverPoint(nearest);
+  };
+
+  return (
+    <div className="futures-chart" ref={containerRef}>
+      <svg
+        className="futures-svg-chart"
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label="台指期當盤漲跌幅"
+        onPointerMove={(event) => updateHoverPoint(event.clientX, event.currentTarget)}
+        onPointerLeave={() => setHoverPoint(null)}
+        onMouseMove={(event) => updateHoverPoint(event.clientX, event.currentTarget)}
+        onMouseLeave={() => setHoverPoint(null)}
+        onTouchMove={(event) => {
+          const touch = event.touches[0];
+          if (touch) {
+            updateHoverPoint(touch.clientX, event.currentTarget);
+          }
+        }}
+        onTouchEnd={() => setHoverPoint(null)}
+      >
+        {[0, 0.5, 1].map((ratio) => {
+          const y = margin.top + ratio * innerHeight;
+          return <line key={`fy-${ratio}`} className="futures-grid-line" x1={margin.left} x2={width - margin.right} y1={y} y2={y} />;
+        })}
+        {axisTicks.map((timestamp) => {
+          const x = xScale(timestamp);
+          return (
+            <g key={timestamp}>
+              <line className="futures-grid-line soft" x1={x} x2={x} y1={margin.top} y2={height - margin.bottom} />
+              <text className="futures-axis-label" x={x} y={height - 9} textAnchor="middle">
+                {formatTaipeiTime(timestamp)}
+              </text>
+            </g>
+          );
+        })}
+        {zeroY >= margin.top && zeroY <= height - margin.bottom && (
+          <line className="futures-zero-line" x1={margin.left} x2={width - margin.right} y1={zeroY} y2={zeroY} />
+        )}
+        <text className="futures-axis-label" x={margin.left - 8} y={margin.top + 5} textAnchor="end">
+          {formatOptionalSignedPercent(yMax)}
+        </text>
+        <text className="futures-axis-label" x={margin.left - 8} y={height - margin.bottom} textAnchor="end">
+          {formatOptionalSignedPercent(yMin)}
+        </text>
+        <path className="futures-line" d={path} fill="none" />
+        {selectedPoint && selectedX !== null && selectedY !== null && (
+          <g className="futures-hover-layer">
+            <line className="futures-hover-line" x1={selectedX} x2={selectedX} y1={margin.top} y2={height - margin.bottom} />
+            <line className="futures-hover-line" x1={margin.left} x2={width - margin.right} y1={selectedY} y2={selectedY} />
+            <circle className="futures-hover-marker" cx={selectedX} cy={selectedY} r="4" />
+            <g transform={`translate(${tooltipX} ${tooltipY})`}>
+              <rect className="futures-tooltip-box" width={tooltipWidth} height={tooltipHeight} rx="8" />
+              <text className="futures-tooltip-label" x="12" y="20">
+                {formatTaipeiTime(selectedPoint.timestamp)}
+              </text>
+              <text className="futures-tooltip-value" x="12" y="43">
+                {formatNumber(selectedPoint.price)}
+              </text>
+              <text className={selectedPoint.value >= 0 ? "futures-tooltip-positive" : "futures-tooltip-negative"} x="12" y="61">
+                {selectedDifference === null ? "—" : formatNumber(Math.abs(selectedDifference))}
+                {" "}
+                ({formatOptionalSignedPercent(selectedPoint.value)})
+              </text>
+            </g>
+          </g>
+        )}
+      </svg>
+    </div>
+  );
 }
 
 function TechnicalAnalysisDisclosure({ symbol, metricUpdatedAt, expanded, onToggle }) {

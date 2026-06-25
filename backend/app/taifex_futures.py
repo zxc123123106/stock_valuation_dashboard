@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
 
 import certifi
+import requests
 from sqlalchemy import delete, select
 from websockets.sync.client import connect
 
@@ -23,7 +24,9 @@ from .database import (
 
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 TAIFEX_SOCKJS_URL = "wss://mis.taifex.com.tw/futures/rt/000/{session_id}/websocket"
+TAIFEX_CHART_DATA_URL = "https://mis.taifex.com.tw/futures/api/getChartData1M_mem"
 TAIFEX_ORIGIN = "https://mis.taifex.com.tw"
+TAIFEX_REFERER = "https://mis.taifex.com.tw/futures/"
 WTX_SYMBOL = "WTX&"
 WTX_NAME = "台指期近一"
 WTX_SOURCE = "TAIFEX MIS rtCore WTX&"
@@ -51,6 +54,7 @@ class FuturesQuoteSnapshot:
     open_price: Decimal
     price_updated_at: datetime
     source: str = WTX_SOURCE
+    source_symbol: str | None = None
 
     @property
     def difference_points(self) -> Decimal:
@@ -101,6 +105,11 @@ def refresh_wtx_futures_cache() -> FuturesQuoteSnapshot | None:
         return None
 
     with SessionLocal() as session:
+        apply_futures_snapshot(session, snapshot)
+        try:
+            backfill_futures_intraday_points(session, snapshot)
+        except Exception as exc:
+            _log_futures_failure(f"WTX chart backfill failed: {exc}", started_at)
         apply_futures_snapshot(session, snapshot)
         session.commit()
     return snapshot
@@ -171,6 +180,71 @@ def apply_futures_snapshot(session, snapshot: FuturesQuoteSnapshot, *, now: date
     cutoff = session_date - timedelta(days=14)
     session.execute(delete(FuturesIntradayPoint).where(FuturesIntradayPoint.session_date < cutoff))
     session.flush()
+
+
+def backfill_futures_intraday_points(session, snapshot: FuturesQuoteSnapshot) -> int:
+    official_symbol = snapshot.source_symbol or _source_symbol_from_snapshot(snapshot)
+    if not official_symbol:
+        return 0
+    fetch_session = current_futures_session(snapshot.price_updated_at)
+    if fetch_session.session_type == "closed" or fetch_session.session_date is None:
+        return 0
+
+    points = fetch_taifex_chart_points(
+        official_symbol,
+        session_type=fetch_session.session_type,
+        session_date=fetch_session.session_date,
+        open_price=snapshot.open_price,
+    )
+    return apply_futures_chart_points(session, snapshot, points, futures_session=fetch_session)
+
+
+def apply_futures_chart_points(
+    session,
+    snapshot: FuturesQuoteSnapshot,
+    points: list[tuple[datetime, Decimal, Decimal]],
+    *,
+    futures_session: FuturesSession,
+    now: datetime | None = None,
+) -> int:
+    now = now or datetime.now(UTC)
+    if futures_session.session_type == "closed" or futures_session.session_date is None:
+        return 0
+
+    normalized_points: dict[datetime, tuple[Decimal, Decimal]] = {}
+    for point_time, price, difference_percent in points:
+        normalized_time = _as_utc(point_time).replace(second=0, microsecond=0)
+        normalized_points[normalized_time] = (price, difference_percent)
+
+    count = 0
+    for normalized_time, (price, difference_percent) in normalized_points.items():
+        point = session.scalar(
+            select(FuturesIntradayPoint).where(
+                FuturesIntradayPoint.symbol == snapshot.symbol,
+                FuturesIntradayPoint.session_type == futures_session.session_type,
+                FuturesIntradayPoint.session_date == futures_session.session_date,
+                FuturesIntradayPoint.point_time == normalized_time,
+            )
+        )
+        if not point:
+            point = FuturesIntradayPoint(
+                symbol=snapshot.symbol,
+                session_type=futures_session.session_type,
+                session_date=futures_session.session_date,
+                point_time=normalized_time,
+            )
+            session.add(point)
+        point.price = price
+        point.open_price = snapshot.open_price
+        point.difference_percent = difference_percent
+        point.source = f"{WTX_SOURCE} chart ({snapshot.source_symbol or _source_symbol_from_snapshot(snapshot) or snapshot.symbol})"
+        point.fetched_at = now
+        point.updated_at = now
+        count += 1
+
+    if count:
+        session.flush()
+    return count
 
 
 def fetch_taifex_futures_quote(symbol: str = WTX_SYMBOL, timeout_seconds: int = 12) -> FuturesQuoteSnapshot:
@@ -320,7 +394,61 @@ def parse_taifex_quote_payload(
         open_price=open_price,
         price_updated_at=_quote_datetime(merged),
         source=f"{WTX_SOURCE} ({symbol})",
+        source_symbol=symbol,
     )
+
+
+def fetch_taifex_chart_points(
+    official_symbol: str,
+    *,
+    session_type: str,
+    session_date: date,
+    open_price: Decimal,
+    timeout_seconds: int = 12,
+) -> list[tuple[datetime, Decimal, Decimal]]:
+    response = requests.post(
+        TAIFEX_CHART_DATA_URL,
+        json={"SymbolID": official_symbol},
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Origin": TAIFEX_ORIGIN,
+            "Referer": TAIFEX_REFERER,
+            "User-Agent": "Mozilla/5.0",
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if str(payload.get("RtCode")) != "0":
+        raise ValueError(payload.get("RtMsg") or f"TAIFEX chart API returned RtCode {payload.get('RtCode')}")
+    ticks = ((payload.get("RtData") or {}).get("Ticks") or [])
+    return parse_taifex_chart_ticks(ticks, session_type=session_type, session_date=session_date, open_price=open_price)
+
+
+def parse_taifex_chart_ticks(
+    ticks: list,
+    *,
+    session_type: str,
+    session_date: date,
+    open_price: Decimal,
+) -> list[tuple[datetime, Decimal, Decimal]]:
+    parsed: list[tuple[datetime, Decimal, Decimal]] = []
+    for tick in ticks:
+        if not isinstance(tick, list) or len(tick) < 5:
+            continue
+        point_time = _chart_tick_time(str(tick[0]), session_type=session_type, session_date=session_date)
+        close_price = _optional_decimal(tick[4])
+        if point_time is None or close_price is None:
+            continue
+        difference_percent = Decimal("0.00")
+        if open_price > 0:
+            difference_percent = ((close_price - open_price) / open_price * Decimal("100")).quantize(
+                PERCENT,
+                rounding=ROUND_HALF_UP,
+            )
+        parsed.append((point_time, close_price, difference_percent))
+    return parsed
 
 
 def latest_wtx_response(limit: int = 900) -> dict:
@@ -370,6 +498,28 @@ def latest_wtx_response(limit: int = 900) -> dict:
                 for point in points
             ],
         }
+
+
+def _source_symbol_from_snapshot(snapshot: FuturesQuoteSnapshot) -> str | None:
+    source = snapshot.source or ""
+    start = source.rfind("(")
+    end = source.rfind(")")
+    if start >= 0 and end > start:
+        return source[start + 1 : end] or None
+    return None
+
+
+def _chart_tick_time(value: str, *, session_type: str, session_date: date) -> datetime | None:
+    digits = "".join(ch for ch in value if ch.isdigit())
+    if len(digits) < 4:
+        return None
+    hour = int(digits[0:2])
+    minute = int(digits[2:4])
+    second = int(digits[4:6]) if len(digits) >= 6 else 0
+    local_date = session_date
+    if session_type == "night" and hour < NIGHT_SESSION_END.hour:
+        local_date = session_date + timedelta(days=1)
+    return datetime.combine(local_date, time(hour, minute, second), tzinfo=TAIPEI_TZ).astimezone(UTC)
 
 
 def _sockjs_messages(frame: str) -> list[str]:
