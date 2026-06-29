@@ -7,14 +7,17 @@ from decimal import Decimal
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from backend.app.database import Base, FuturesIntradayPoint
+from backend.app.database import Base, FuturesIntradayPoint, FuturesSnapshot
 from backend.app.taifex_futures import (
     FuturesQuoteSnapshot,
     FuturesSession,
+    _group_points_by_futures_session,
+    _latest_non_closed_chart_session,
     apply_futures_chart_points,
     apply_futures_snapshot,
     current_futures_session,
     futures_session_range,
+    latest_wtx_response,
     official_txf_candidate_symbols,
     parse_taifex_chart_ticks,
     parse_taifex_quote_payload,
@@ -225,9 +228,12 @@ class TaifexChartParserTest(unittest.TestCase):
 
 class TaifexCacheTest(unittest.TestCase):
     def setUp(self) -> None:
-        engine = create_engine("sqlite:///:memory:", future=True)
-        Base.metadata.create_all(engine)
-        self.Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+        self.engine = create_engine("sqlite:///:memory:", future=True)
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine, autoflush=False, autocommit=False, future=True)
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
 
     def test_upserts_trade_and_heartbeat_points_per_minute(self) -> None:
         with self.Session() as session:
@@ -292,6 +298,27 @@ class TaifexCacheTest(unittest.TestCase):
         self.assertEqual(points[0].point_time.isoformat(), "2026-06-25T17:59:00")
         self.assertEqual(points[0].source, "TAIFEX MIS rtCore WTX& (TXFG6-M)")
         self.assertEqual(points[0].price, Decimal("45717.00"))
+
+    def test_closed_snapshot_does_not_create_closed_chart_points(self) -> None:
+        with self.Session() as session:
+            apply_futures_snapshot(
+                session,
+                FuturesQuoteSnapshot(
+                    symbol="WTX&",
+                    name="台指期近一",
+                    current_price=Decimal("45805.00"),
+                    open_price=Decimal("46430.00"),
+                    price_updated_at=datetime(2026, 6, 26, 0, 18, tzinfo=UTC),
+                    source="TAIFEX MIS rtCore WTX& (TXFG6-M)",
+                    source_symbol="TXFG6-M",
+                ),
+                now=datetime(2026, 6, 26, 0, 18, tzinfo=UTC),
+            )
+            session.commit()
+
+            points = session.scalars(select(FuturesIntradayPoint)).all()
+
+        self.assertEqual(points, [])
 
     def test_upserts_backfilled_chart_points_per_minute(self) -> None:
         with self.Session() as session:
@@ -373,6 +400,115 @@ class TaifexCacheTest(unittest.TestCase):
         self.assertEqual(points[1].point_time.isoformat(), "2026-06-25T19:36:00")
         self.assertEqual(points[1].price, Decimal("45653.00"))
         self.assertTrue(points[1].source.startswith("Yahoo"))
+
+    def test_groups_yahoo_points_by_actual_futures_session(self) -> None:
+        grouped = _group_points_by_futures_session(
+            [
+                (datetime(2026, 6, 25, 7, 1, tzinfo=UTC), Decimal("46495.00"), Decimal("0.14")),
+                (datetime(2026, 6, 25, 18, 30, tzinfo=UTC), Decimal("45680.00"), Decimal("-1.62")),
+                (datetime(2026, 6, 26, 0, 20, tzinfo=UTC), Decimal("45805.00"), Decimal("-1.35")),
+            ]
+        )
+
+        self.assertEqual(len(grouped), 1)
+        futures_session = next(iter(grouped))
+        self.assertEqual(futures_session.session_type, "night")
+        self.assertEqual(futures_session.session_date.isoformat(), "2026-06-25")
+        self.assertEqual(len(grouped[futures_session]), 2)
+
+    def test_latest_non_closed_chart_session_ignores_closed_points(self) -> None:
+        with self.Session() as session:
+            session.add_all(
+                [
+                    FuturesIntradayPoint(
+                        symbol="WTX&",
+                        session_type="night",
+                        session_date=datetime(2026, 6, 25, tzinfo=UTC).date(),
+                        point_time=datetime(2026, 6, 25, 20, 59, tzinfo=UTC),
+                        price=Decimal("45650.00"),
+                        open_price=Decimal("46430.00"),
+                        difference_percent=Decimal("-1.68"),
+                        source="Yahoo FinanceChartService.ApacLibraCharts WTX&",
+                        fetched_at=datetime(2026, 6, 25, 21, 0, tzinfo=UTC),
+                    ),
+                    FuturesIntradayPoint(
+                        symbol="WTX&",
+                        session_type="closed",
+                        session_date=datetime(2026, 6, 26, tzinfo=UTC).date(),
+                        point_time=datetime(2026, 6, 26, 0, 18, tzinfo=UTC),
+                        price=Decimal("45805.00"),
+                        open_price=Decimal("46430.00"),
+                        difference_percent=Decimal("-1.35"),
+                        source="TAIFEX MIS rtCore WTX& (TXFG6-M)",
+                        fetched_at=datetime(2026, 6, 26, 0, 18, tzinfo=UTC),
+                    ),
+                ]
+            )
+            session.commit()
+
+            chart_session = _latest_non_closed_chart_session(session)
+
+        self.assertIsNotNone(chart_session)
+        self.assertEqual(chart_session.session_type, "night")
+        self.assertEqual(chart_session.session_date.isoformat(), "2026-06-25")
+
+    def test_latest_response_uses_recent_valid_chart_session_while_closed(self) -> None:
+        with self.Session() as session:
+            session.add(
+                FuturesSnapshot(
+                    symbol="WTX&",
+                    name="台指期近一",
+                    session_type="closed",
+                    session_label="最近一盤",
+                    session_date=datetime(2026, 6, 26, tzinfo=UTC).date(),
+                    current_price=Decimal("45805.00"),
+                    open_price=Decimal("46430.00"),
+                    difference_points=Decimal("-625.00"),
+                    difference_percent=Decimal("-1.35"),
+                    price_updated_at=datetime(2026, 6, 26, 0, 18, tzinfo=UTC),
+                    source="TAIFEX MIS rtCore WTX& (TXFG6-M)",
+                    fetched_at=datetime(2026, 6, 26, 0, 18, tzinfo=UTC),
+                )
+            )
+            session.add_all(
+                [
+                    FuturesIntradayPoint(
+                        symbol="WTX&",
+                        session_type="night",
+                        session_date=datetime(2026, 6, 25, tzinfo=UTC).date(),
+                        point_time=datetime(2026, 6, 25, 20, 59, tzinfo=UTC),
+                        price=Decimal("45650.00"),
+                        open_price=Decimal("46430.00"),
+                        difference_percent=Decimal("-1.68"),
+                        source="Yahoo FinanceChartService.ApacLibraCharts WTX&",
+                        fetched_at=datetime(2026, 6, 25, 21, 0, tzinfo=UTC),
+                    ),
+                    FuturesIntradayPoint(
+                        symbol="WTX&",
+                        session_type="closed",
+                        session_date=datetime(2026, 6, 26, tzinfo=UTC).date(),
+                        point_time=datetime(2026, 6, 26, 0, 18, tzinfo=UTC),
+                        price=Decimal("45805.00"),
+                        open_price=Decimal("46430.00"),
+                        difference_percent=Decimal("-1.35"),
+                        source="TAIFEX MIS rtCore WTX& (TXFG6-M)",
+                        fetched_at=datetime(2026, 6, 26, 0, 18, tzinfo=UTC),
+                    ),
+                ]
+            )
+            session.commit()
+
+        response = latest_wtx_response(
+            now=datetime(2026, 6, 26, 0, 18, tzinfo=UTC),
+            session_factory=self.Session,
+        )
+
+        self.assertEqual(response["session_type"], "night")
+        self.assertEqual(response["session_label"], "夜盤")
+        self.assertEqual(response["session_start_at"].isoformat(), "2026-06-25T07:00:00+00:00")
+        self.assertEqual(response["session_end_at"].isoformat(), "2026-06-25T21:00:00+00:00")
+        self.assertEqual(len(response["chart_points"]), 1)
+        self.assertEqual(response["chart_points"][0]["timestamp"].isoformat(), "2026-06-25T20:59:00+00:00")
 
 
 if __name__ == "__main__":

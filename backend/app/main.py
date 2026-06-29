@@ -24,8 +24,10 @@ from .ai_analysis import (
     AIConfigurationError,
     ai_provider_identity,
     build_ai_provider,
+    grounding_errors_from_validation_errors,
     normalize_ai_analysis,
     normalize_ai_analysis_with_errors,
+    quality_flags_from_validation_errors,
     stock_summary_hash,
 )
 from .config import get_settings
@@ -34,6 +36,7 @@ from .database import (
     DATABASE_URL,
     Stock,
     StockAIAnalysis,
+    StockAIFeedback,
     StockBrokerTrading,
     StockBrokerTradingRow,
     StockDailyPrice,
@@ -68,6 +71,8 @@ from .schemas import (
     RefreshQueueResponse,
     RefreshStatusResponse,
     StockDeleteResponse,
+    StockAIAnalysisFeedbackRequest,
+    StockAIAnalysisFeedbackResponse,
     StockAIAnalysisRequest,
     StockAIAnalysisModesResponse,
     StockAIAnalysisResultResponse,
@@ -858,6 +863,36 @@ def _technical_summary_for_ai(stock: Stock, session: Session) -> dict:
     }
 
 
+def _ai_evidence_from_summary(summary: dict) -> dict[str, object]:
+    evidence: dict[str, object] = {}
+    aliases = {
+        "pe_context": "valuation",
+    }
+
+    def add(prefix: str, value) -> None:
+        if value is None:
+            return
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key in {"source", "fetched_at"} and prefix:
+                    continue
+                add(f"{prefix}.{key}" if prefix else str(key), nested)
+            return
+        if isinstance(value, list):
+            for index, nested in enumerate(value):
+                add(f"{prefix}.{index}", nested)
+            return
+        if prefix:
+            evidence[prefix] = value
+
+    for top_key, value in summary.items():
+        if top_key in {"evidence", "available_evidence_keys", "summary_version", "prompt_version", "analysis_mode"}:
+            continue
+        evidence_key = aliases.get(top_key, top_key)
+        add(evidence_key, value)
+    return evidence
+
+
 def _ai_stock_summary(stock: Stock, session: Session, analysis_mode: str) -> dict:
     stock_response = _stock_response(stock, session)
     broker_trading = stock_response.broker_trading
@@ -928,6 +963,9 @@ def _ai_stock_summary(stock: Stock, session: Session, analysis_mode: str) -> dic
             "broker_id": position.broker_id,
             "broker_fee_rate": position.broker_fee_rate,
         }
+    evidence = _ai_evidence_from_summary(summary)
+    summary["evidence"] = evidence
+    summary["available_evidence_keys"] = sorted(evidence)
     return summary
 
 
@@ -957,7 +995,9 @@ def _ai_analysis_result_response(row: StockAIAnalysis, cached: bool) -> StockAIA
         analysis_payload = json.loads(row.response_json)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=500, detail="Cached AI analysis is invalid.") from exc
+    evidence_keys = _ai_row_evidence_keys(row)
     return StockAIAnalysisResultResponse(
+        id=row.id,
         mode=row.analysis_mode,
         provider=row.provider,
         model=row.model,
@@ -965,8 +1005,19 @@ def _ai_analysis_result_response(row: StockAIAnalysis, cached: bool) -> StockAIA
         cached=cached,
         analysis_date=row.analysis_date,
         generated_at=row.updated_at,
-        analysis=normalize_ai_analysis(analysis_payload, row.analysis_mode),
+        analysis=normalize_ai_analysis(analysis_payload, row.analysis_mode, evidence_keys=evidence_keys),
     )
+
+
+def _ai_row_evidence_keys(row: StockAIAnalysis) -> set[str] | None:
+    try:
+        payload = json.loads(row.request_payload_json)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    evidence = payload.get("evidence") if isinstance(payload, dict) else None
+    if not isinstance(evidence, dict):
+        return None
+    return {str(key) for key in evidence.keys()}
 
 
 def _ai_analysis_is_cacheable(row: StockAIAnalysis | None) -> bool:
@@ -994,6 +1045,23 @@ def _ai_analysis_is_cacheable(row: StockAIAnalysis | None) -> bool:
     if any("warning:" not in str(error) for error in validation_errors):
         return False
     return True
+
+
+def _ai_failure_http_status_code(errors: dict[str, str]) -> int:
+    joined = " ".join(errors.values()).lower()
+    if "status 429" in joined or "rate limit" in joined or "too many requests" in joined:
+        return status.HTTP_429_TOO_MANY_REQUESTS
+    if (
+        "status 500" in joined
+        or "status 502" in joined
+        or "status 503" in joined
+        or "status 504" in joined
+        or "bad gateway" in joined
+        or "high demand" in joined
+        or "temporarily unavailable" in joined
+    ):
+        return status.HTTP_503_SERVICE_UNAVAILABLE
+    return status.HTTP_502_BAD_GATEWAY
 
 
 def _ai_analysis_batch_response(
@@ -1081,11 +1149,14 @@ def _repair_ai_analysis_cache_row(session: Session, row: StockAIAnalysis) -> boo
     analysis, validation_errors = normalize_ai_analysis_with_errors(
         row.raw_response_text,
         row.analysis_mode,
+        evidence_keys=_ai_row_evidence_keys(row),
     )
     if not analysis.format_valid:
         return False
     row.response_json = json.dumps(analysis.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
     row.validation_errors_json = json.dumps(validation_errors, ensure_ascii=False)
+    row.quality_flags_json = json.dumps(quality_flags_from_validation_errors(validation_errors), ensure_ascii=False)
+    row.grounding_errors_json = json.dumps(grounding_errors_from_validation_errors(validation_errors), ensure_ascii=False)
     row.status = "success"
     row.error_message = None
     session.commit()
@@ -1234,16 +1305,28 @@ def _generate_ai_mode(
         provider_result = provider.analyze_stock(stock_summary, analysis_mode)
     except AIAnalysisError as exc:
         now = datetime.now(UTC)
+        error_message = str(exc)
+        quality_flags = ["provider_error"]
+        lower_error = error_message.lower()
+        if "status 429" in lower_error or "rate limit" in lower_error or "too many requests" in lower_error:
+            quality_flags.append("provider_rate_limited")
+        if any(token in lower_error for token in ("status 500", "status 502", "status 503", "status 504", "bad gateway", "high demand")):
+            quality_flags.append("provider_outage")
         row.request_payload_json = request_payload_json
         row.response_json = "{}"
         row.raw_response_text = None
         row.provider_metadata_json = None
         row.validation_errors_json = json.dumps([], ensure_ascii=False)
+        row.quality_flags_json = json.dumps(sorted(set(quality_flags)), ensure_ascii=False)
+        row.grounding_errors_json = json.dumps([], ensure_ascii=False)
         row.status = "failed"
-        row.error_message = str(exc)
+        row.error_message = error_message
         row.updated_at = now
         session.commit()
-        return None, False, str(exc), False
+        fallback_row = _latest_ai_cache_row(session, stock, provider.provider_id, provider.model, analysis_mode)
+        if fallback_row is not None:
+            return fallback_row, True, f"{error_message}；已顯示最近成功快取。", False
+        return None, False, error_message, False
 
     now = datetime.now(UTC)
     row.request_payload_json = request_payload_json
@@ -1251,6 +1334,8 @@ def _generate_ai_mode(
     row.raw_response_text = provider_result.raw_response_text
     row.provider_metadata_json = json.dumps(provider_result.provider_metadata, ensure_ascii=False, sort_keys=True)
     row.validation_errors_json = json.dumps(provider_result.validation_errors, ensure_ascii=False)
+    row.quality_flags_json = json.dumps(provider_result.quality_flags, ensure_ascii=False)
+    row.grounding_errors_json = json.dumps(provider_result.grounding_errors, ensure_ascii=False)
     row.status = "success" if provider_result.analysis.format_valid else "format_fallback"
     row.error_message = None if provider_result.analysis.format_valid else "AI response failed validation."
     row.updated_at = now
@@ -1270,7 +1355,19 @@ def _json_field(value: str | None):
         return value
 
 
-def _ai_log_record(row: StockAIAnalysis, symbol: str) -> dict:
+def _ai_feedback_record(feedback: StockAIFeedback | None) -> dict | None:
+    if feedback is None:
+        return None
+    return {
+        "rating": feedback.rating,
+        "tags": _json_field(feedback.tags_json) or [],
+        "note": feedback.note,
+        "created_at": feedback.created_at.isoformat(),
+        "updated_at": feedback.updated_at.isoformat(),
+    }
+
+
+def _ai_log_record(row: StockAIAnalysis, symbol: str, feedback: StockAIFeedback | None = None) -> dict:
     return {
         "id": row.id,
         "symbol": symbol,
@@ -1287,6 +1384,9 @@ def _ai_log_record(row: StockAIAnalysis, symbol: str) -> dict:
         "raw_response_text": row.raw_response_text,
         "provider_metadata": _json_field(row.provider_metadata_json),
         "validation_errors": _json_field(row.validation_errors_json) or [],
+        "quality_flags": _json_field(row.quality_flags_json) or [],
+        "grounding_errors": _json_field(row.grounding_errors_json) or [],
+        "feedback": _ai_feedback_record(feedback),
         "created_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat(),
     }
@@ -1522,10 +1622,167 @@ def create_stock_ai_analysis(
             response.status_code = status.HTTP_202_ACCEPTED
             return _ai_analysis_batch_response(stock.symbol, results, errors, running)
         details = "；".join(f"{mode}: {message}" for mode, message in errors.items())
-        raise HTTPException(status_code=502, detail=details or "AI analysis failed.")
+        raise HTTPException(status_code=_ai_failure_http_status_code(errors), detail=details or "AI analysis failed.")
     if running:
         response.status_code = status.HTTP_202_ACCEPTED
     return _ai_analysis_batch_response(stock.symbol, results, errors, running)
+
+
+@app.post("/api/stocks/{symbol}/ai-analysis/{mode}/feedback", response_model=StockAIAnalysisFeedbackResponse)
+def submit_stock_ai_analysis_feedback(
+    symbol: str,
+    mode: str,
+    payload: StockAIAnalysisFeedbackRequest,
+    session: Session = Depends(get_session),
+) -> StockAIAnalysisFeedbackResponse:
+    try:
+        normalized_symbol = normalize_symbol(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    normalized_mode = mode.strip().upper()
+    if normalized_mode not in {AI_MODE_UNHELD, AI_MODE_HELD}:
+        raise HTTPException(status_code=400, detail="Unsupported analysis mode.")
+
+    stock = session.scalar(select(Stock).where(Stock.symbol == normalized_symbol, Stock.is_active.is_(True)))
+    if not stock:
+        raise HTTPException(status_code=404, detail="Stock not found")
+
+    query = select(StockAIAnalysis).where(
+        StockAIAnalysis.stock_id == stock.id,
+        StockAIAnalysis.analysis_mode == normalized_mode,
+        StockAIAnalysis.status == "success",
+    )
+    if payload.analysis_id is not None:
+        query = query.where(StockAIAnalysis.id == payload.analysis_id)
+    else:
+        query = query.order_by(StockAIAnalysis.updated_at.desc()).limit(1)
+    analysis = session.scalar(query)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Successful AI analysis not found.")
+
+    now = datetime.now(UTC)
+    tags_json = json.dumps(payload.tags, ensure_ascii=False, sort_keys=True)
+    feedback = session.scalar(select(StockAIFeedback).where(StockAIFeedback.analysis_id == analysis.id))
+    if feedback:
+        feedback.rating = payload.rating
+        feedback.tags_json = tags_json
+        feedback.note = payload.note.strip() if payload.note else None
+        feedback.updated_at = now
+    else:
+        feedback = StockAIFeedback(
+            analysis_id=analysis.id,
+            stock_id=stock.id,
+            symbol=stock.symbol,
+            analysis_mode=normalized_mode,
+            rating=payload.rating,
+            tags_json=tags_json,
+            note=payload.note.strip() if payload.note else None,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(feedback)
+    session.commit()
+    session.refresh(feedback)
+    return StockAIAnalysisFeedbackResponse(
+        status="ok",
+        analysis_id=analysis.id,
+        rating=feedback.rating,
+        tags=_json_field(feedback.tags_json) or [],
+        note=feedback.note,
+        updated_at=feedback.updated_at,
+    )
+
+
+@app.get("/api/ai-analysis/logs/summary")
+def ai_analysis_logs_summary(
+    symbol: str | None = Query(default=None),
+    mode: str | None = Query(default=None),
+    provider: str | None = Query(default=None),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    session: Session = Depends(get_session),
+):
+    query = select(StockAIAnalysis, Stock.symbol).join(Stock, Stock.id == StockAIAnalysis.stock_id)
+    if symbol:
+        try:
+            query = query.where(Stock.symbol == normalize_symbol(symbol))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if mode:
+        normalized_mode = mode.strip().upper()
+        if normalized_mode not in {"GENERAL", AI_MODE_UNHELD, AI_MODE_HELD}:
+            raise HTTPException(status_code=400, detail="Unsupported analysis mode.")
+        query = query.where(StockAIAnalysis.analysis_mode == normalized_mode)
+    if provider:
+        query = query.where(StockAIAnalysis.provider == provider.strip().lower())
+    if date_from:
+        query = query.where(StockAIAnalysis.analysis_date >= date_from)
+    if date_to:
+        query = query.where(StockAIAnalysis.analysis_date <= date_to)
+
+    rows = session.execute(query).all()
+    analysis_ids = [row.id for row, _ in rows]
+    feedback_rows = (
+        session.scalars(select(StockAIFeedback).where(StockAIFeedback.analysis_id.in_(analysis_ids))).all()
+        if analysis_ids
+        else []
+    )
+
+    def increment(bucket: dict[str, int], key: str | None) -> None:
+        bucket[str(key or "unknown")] = bucket.get(str(key or "unknown"), 0) + 1
+
+    by_status: dict[str, int] = {}
+    by_mode: dict[str, int] = {}
+    by_provider: dict[str, int] = {}
+    provider_error_counts = {"rate_limited": 0, "outage": 0, "other": 0}
+    validation_error_counts: dict[str, int] = {}
+    quality_flag_counts: dict[str, int] = {}
+    grounding_error_counts: dict[str, int] = {}
+    for row, _ in rows:
+        increment(by_status, row.status)
+        increment(by_mode, row.analysis_mode)
+        increment(by_provider, row.provider)
+        if row.status == "failed":
+            error = (row.error_message or "").lower()
+            if "status 429" in error or "rate limit" in error:
+                provider_error_counts["rate_limited"] += 1
+            elif any(token in error for token in ("status 500", "status 502", "status 503", "status 504", "bad gateway", "high demand")):
+                provider_error_counts["outage"] += 1
+            else:
+                provider_error_counts["other"] += 1
+        for error in _json_field(row.validation_errors_json) or []:
+            increment(validation_error_counts, str(error).split(":")[-1].strip())
+        for flag in _json_field(row.quality_flags_json) or []:
+            increment(quality_flag_counts, str(flag))
+        for error in _json_field(row.grounding_errors_json) or []:
+            increment(grounding_error_counts, str(error))
+
+    feedback_by_rating: dict[str, int] = {}
+    feedback_by_tag: dict[str, int] = {}
+    for feedback in feedback_rows:
+        increment(feedback_by_rating, feedback.rating)
+        for tag in _json_field(feedback.tags_json) or []:
+            increment(feedback_by_tag, str(tag))
+
+    total = len(rows)
+    return {
+        "total": total,
+        "by_status": by_status,
+        "by_mode": by_mode,
+        "by_provider": by_provider,
+        "success_rate": round(by_status.get("success", 0) / total * 100, 2) if total else 0,
+        "format_fallback_rate": round(by_status.get("format_fallback", 0) / total * 100, 2) if total else 0,
+        "provider_errors": provider_error_counts,
+        "validation_error_counts": validation_error_counts,
+        "quality_flag_counts": quality_flag_counts,
+        "grounding_error_counts": grounding_error_counts,
+        "feedback": {
+            "total": len(feedback_rows),
+            "by_rating": feedback_by_rating,
+            "by_tag": feedback_by_tag,
+        },
+    }
 
 
 @app.get("/api/ai-analysis/logs/export")
@@ -1562,7 +1819,20 @@ def export_ai_analysis_logs(
     if date_to:
         query = query.where(StockAIAnalysis.analysis_date <= date_to)
 
-    records = [_ai_log_record(row, stock_symbol) for row, stock_symbol in session.execute(query).all()]
+    rows = session.execute(query).all()
+    analysis_ids = [row.id for row, _ in rows]
+    feedback_by_analysis_id = {
+        feedback.analysis_id: feedback
+        for feedback in (
+            session.scalars(select(StockAIFeedback).where(StockAIFeedback.analysis_id.in_(analysis_ids))).all()
+            if analysis_ids
+            else []
+        )
+    }
+    records = [
+        _ai_log_record(row, stock_symbol, feedback_by_analysis_id.get(row.id))
+        for row, stock_symbol in rows
+    ]
     filename = f"ai-analysis-logs-{datetime.now(TAIPEI_TZ).date().isoformat()}"
     if format == "json":
         return JSONResponse(
@@ -1587,6 +1857,9 @@ def export_ai_analysis_logs(
         "raw_response_text",
         "provider_metadata",
         "validation_errors",
+        "quality_flags",
+        "grounding_errors",
+        "feedback",
         "created_at",
         "updated_at",
     ]
@@ -1654,6 +1927,7 @@ async def delete_stock(symbol: str, session: Session = Depends(get_session)) -> 
     session.execute(delete(StockPEHistory).where(StockPEHistory.stock_id == stock.id))
     session.execute(delete(StockMonthlyRevenue).where(StockMonthlyRevenue.stock_id == stock.id))
     session.execute(delete(StockFinancialQuarter).where(StockFinancialQuarter.stock_id == stock.id))
+    session.execute(delete(StockAIFeedback).where(StockAIFeedback.stock_id == stock.id))
     session.execute(delete(StockAIAnalysis).where(StockAIAnalysis.stock_id == stock.id))
     session.execute(delete(StockRefreshState).where(StockRefreshState.symbol == normalized_symbol))
     session.execute(delete(CrawlerLog).where(CrawlerLog.job_name == f"market_refresh:{normalized_symbol}"))

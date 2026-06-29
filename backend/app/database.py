@@ -323,12 +323,30 @@ class StockAIAnalysis(Base):
     raw_response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     provider_metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     validation_errors_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quality_flags_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    grounding_errors_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="success")
     error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     stock: Mapped[Stock] = relationship(back_populates="ai_analyses")
+
+
+class StockAIFeedback(Base):
+    __tablename__ = "stock_ai_feedback"
+    __table_args__ = (UniqueConstraint("analysis_id", name="uq_stock_ai_feedback_analysis"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    analysis_id: Mapped[int] = mapped_column(ForeignKey("stock_ai_analyses.id"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    symbol: Mapped[str] = mapped_column(String(24), index=True)
+    analysis_mode: Mapped[str] = mapped_column(String(16), index=True)
+    rating: Mapped[str] = mapped_column(String(24), index=True)
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
 class AppMaintenanceState(Base):
@@ -517,6 +535,8 @@ def ensure_ai_analysis_log_columns() -> None:
                 "raw_response_text": "TEXT",
                 "provider_metadata_json": "TEXT",
                 "validation_errors_json": "TEXT",
+                "quality_flags_json": "TEXT",
+                "grounding_errors_json": "TEXT",
             },
         )
         connection.execute(
@@ -536,6 +556,14 @@ def ensure_ai_analysis_log_columns() -> None:
 
 
 def _remove_legacy_ai_analysis_unique_constraint(connection) -> None:
+    _ensure_table_columns(
+        connection,
+        "stock_ai_analyses",
+        {
+            "quality_flags_json": "TEXT",
+            "grounding_errors_json": "TEXT",
+        },
+    )
     connection.execute(text("DROP TABLE IF EXISTS stock_ai_analyses_v2"))
     connection.execute(
         text(
@@ -554,6 +582,8 @@ def _remove_legacy_ai_analysis_unique_constraint(connection) -> None:
                 raw_response_text TEXT,
                 provider_metadata_json TEXT,
                 validation_errors_json TEXT,
+                quality_flags_json TEXT,
+                grounding_errors_json TEXT,
                 status VARCHAR(24) NOT NULL,
                 error_message VARCHAR(500),
                 created_at DATETIME NOT NULL,
@@ -570,12 +600,14 @@ def _remove_legacy_ai_analysis_unique_constraint(connection) -> None:
                 id, stock_id, provider, model, analysis_mode, prompt_version,
                 analysis_date, input_hash, request_payload_json, response_json,
                 raw_response_text, provider_metadata_json, validation_errors_json,
+                quality_flags_json, grounding_errors_json,
                 status, error_message, created_at, updated_at
             )
             SELECT
                 id, stock_id, provider, model, analysis_mode, prompt_version,
                 analysis_date, input_hash, request_payload_json, response_json,
                 raw_response_text, provider_metadata_json, validation_errors_json,
+                quality_flags_json, grounding_errors_json,
                 status, error_message, created_at, updated_at
             FROM stock_ai_analyses
             """

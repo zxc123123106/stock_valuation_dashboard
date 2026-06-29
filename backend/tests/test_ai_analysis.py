@@ -5,17 +5,42 @@ from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from backend.app.ai_analysis import (
     AI_MODE_HELD,
     AI_MODE_UNHELD,
+    AIAnalysisError,
     OpenRouterProvider,
+    PROMPT_VERSION,
     _message_content_text,
     normalize_ai_analysis,
     normalize_ai_analysis_with_errors,
     stock_summary_hash,
 )
+from backend.app.database import Base, Stock, StockAIAnalysis
 from backend.app.main import _ai_analysis_is_cacheable, _ai_stock_summary
 from backend.app.main import _ai_analysis_is_fresh_inflight
+from backend.app.main import _ai_failure_http_status_code, _generate_ai_mode
+from backend.app.main import ai_analysis_logs_summary, submit_stock_ai_analysis_feedback
+from backend.app.schemas import StockAIAnalysisFeedbackRequest
+
+
+def analysis_text(value):
+    return value.text if hasattr(value, "text") else value
+
+
+def analysis_texts(values):
+    return [analysis_text(value) for value in values]
+
+
+class FailingProvider:
+    provider_id = "openrouter"
+    model = "openai/gpt-oss-120b:free"
+
+    def analyze_stock(self, stock_summary, analysis_mode):
+        raise AIAnalysisError("OpenRouter API request failed with status 429. Provider returned error")
 
 
 class AIAnalysisTest(unittest.TestCase):
@@ -39,7 +64,7 @@ class AIAnalysisTest(unittest.TestCase):
         )
 
         self.assertEqual(analysis.overall_status, "觀察")
-        self.assertEqual(analysis.positive_points, ["股價仍高於 MA20"])
+        self.assertEqual(analysis_texts(analysis.positive_points), ["股價仍高於 MA20"])
         self.assertEqual(analysis.disclaimer, "本分析僅依據既有資料整理，不構成任何投資建議。")
 
     def test_normalize_ai_analysis_repairs_trailing_commas(self) -> None:
@@ -56,16 +81,16 @@ class AIAnalysisTest(unittest.TestCase):
             """
         )
 
-        self.assertEqual(analysis.risk_points, ["PE 偏高"])
+        self.assertEqual(analysis_texts(analysis.risk_points), ["PE 偏高"])
 
     def test_normalize_ai_analysis_falls_back_to_plain_text_summary(self) -> None:
         analysis = normalize_ai_analysis("目前技術面偏強，但估值偏高，建議持續觀察月營收與 MA20。")
 
         self.assertEqual(analysis.overall_status, "觀察")
-        self.assertIn("技術面偏強", analysis.summary)
+        self.assertIn("技術面偏強", analysis_text(analysis.summary))
         self.assertFalse(analysis.format_valid)
-        self.assertEqual(analysis.risk_points, [])
-        self.assertEqual(analysis.watch_points, ["可重新產生 AI 分析以取得結構化摘要。"])
+        self.assertEqual(analysis_texts(analysis.risk_points), [])
+        self.assertEqual(analysis_texts(analysis.watch_points), ["可重新產生 AI 分析以取得結構化摘要。"])
 
     def test_normalize_ai_analysis_parses_loose_key_value_fragment(self) -> None:
         analysis = normalize_ai_analysis(
@@ -79,9 +104,9 @@ class AIAnalysisTest(unittest.TestCase):
         )
 
         self.assertEqual(analysis.overall_status, "觀察")
-        self.assertEqual(analysis.summary, "臻鼎-KY目前持股有顯著未實現獲利30.08%，但估值偏高。")
-        self.assertEqual(analysis.positive_points, ["持股已有未實現獲利"])
-        self.assertEqual(analysis.risk_points, ["目前PE偏高"])
+        self.assertEqual(analysis_text(analysis.summary), "臻鼎-KY目前持股有顯著未實現獲利30.08%，但估值偏高。")
+        self.assertEqual(analysis_texts(analysis.positive_points), ["持股已有未實現獲利"])
+        self.assertEqual(analysis_texts(analysis.risk_points), ["目前PE偏高"])
 
     def test_normalize_ai_analysis_parses_truncated_summary_fragment(self) -> None:
         analysis = normalize_ai_analysis(
@@ -89,8 +114,8 @@ class AIAnalysisTest(unittest.TestCase):
         )
 
         self.assertEqual(analysis.overall_status, "觀察")
-        self.assertEqual(analysis.summary, "臻鼎-KY目前持股有顯著未實現獲利30.08")
-        self.assertEqual(analysis.risk_points, [])
+        self.assertEqual(analysis_text(analysis.summary), "臻鼎-KY目前持股有顯著未實現獲利30.08")
+        self.assertEqual(analysis_texts(analysis.risk_points), [])
 
     def test_message_content_text_reads_openrouter_content_parts(self) -> None:
         text = _message_content_text(
@@ -159,6 +184,69 @@ class AIAnalysisTest(unittest.TestCase):
 
         self.assertTrue(_ai_analysis_is_cacheable(row))
 
+    def test_ai_failure_status_code_distinguishes_rate_limit_and_provider_outage(self) -> None:
+        self.assertEqual(
+            _ai_failure_http_status_code({"unheld": "OpenRouter API request failed with status 429."}),
+            429,
+        )
+        self.assertEqual(
+            _ai_failure_http_status_code({"unheld": "OpenRouter API request failed with status 502. Bad Gateway"}),
+            503,
+        )
+        self.assertEqual(
+            _ai_failure_http_status_code({"unheld": "OpenRouter did not return any choices."}),
+            502,
+        )
+
+    @patch("backend.app.main._ai_stock_summary", return_value={"symbol": "4958", "price": 590})
+    def test_ai_generation_failure_returns_latest_success_cache(self, _summary) -> None:
+        engine = create_engine("sqlite:///:memory:", future=True)
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+        with Session() as session:
+            stock = Stock(symbol="4958", name="臻鼎-KY", asset_type="STOCK")
+            session.add(stock)
+            session.commit()
+            session.refresh(stock)
+            cached_row = StockAIAnalysis(
+                stock_id=stock.id,
+                provider="openrouter",
+                model="openai/gpt-oss-120b:free",
+                analysis_mode=AI_MODE_UNHELD,
+                prompt_version=PROMPT_VERSION,
+                analysis_date=date(2026, 6, 24),
+                input_hash="old-input",
+                request_payload_json="{}",
+                response_json=(
+                    '{"overall_status":"等待",'
+                    '"summary":"目前估值、基本面、技術面與籌碼訊號仍然分歧，尚未形成一致方向，適合等待既有資料確認。",'
+                    '"positive_points":[],"risk_points":[],"watch_points":[],"disclaimer":"僅供資料整理。","format_valid":true}'
+                ),
+                validation_errors_json="[]",
+                status="success",
+                updated_at=datetime(2026, 6, 24, tzinfo=UTC),
+            )
+            session.add(cached_row)
+            session.commit()
+            session.refresh(cached_row)
+
+            row, cached, error, is_running = _generate_ai_mode(
+                session,
+                stock,
+                FailingProvider(),
+                AI_MODE_UNHELD,
+                force_refresh=True,
+            )
+
+            failed_count = session.query(StockAIAnalysis).filter(StockAIAnalysis.status == "failed").count()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row.id, cached_row.id)
+        self.assertTrue(cached)
+        self.assertFalse(is_running)
+        self.assertIn("已顯示最近成功快取", error)
+        self.assertEqual(failed_count, 1)
+
     def test_unheld_mode_rejects_held_status(self) -> None:
         analysis, errors = normalize_ai_analysis_with_errors(
             {
@@ -175,6 +263,31 @@ class AIAnalysisTest(unittest.TestCase):
         self.assertEqual(analysis.overall_status, "資料不足")
         self.assertFalse(analysis.format_valid)
         self.assertTrue(any("Unsupported status" in error for error in errors))
+
+    def test_grounded_analysis_requires_valid_evidence_keys(self) -> None:
+        analysis, errors = normalize_ai_analysis_with_errors(
+            {
+                "overall_status": "等待",
+                "summary": {
+                    "text": "目前現價與估值訊號仍然沒有形成足夠一致方向，應等待後續已提供數據確認後再評估進場。",
+                    "evidence_keys": ["quote.current_price_twd"],
+                },
+                "positive_points": [
+                    {"text": "現價資料已可用", "evidence_keys": ["quote.current_price_twd"]}
+                ],
+                "risk_points": [
+                    {"text": "引用不存在的證據", "evidence_keys": ["not.real"]}
+                ],
+                "watch_points": [],
+                "disclaimer": "僅供資料整理。",
+            },
+            AI_MODE_UNHELD,
+            evidence_keys={"quote.current_price_twd"},
+        )
+
+        self.assertEqual(analysis.summary.evidence_keys, ["quote.current_price_twd"])
+        self.assertFalse(analysis.format_valid)
+        self.assertTrue(any("invalid evidence key" in error for error in errors))
 
     def test_private_position_request_is_filtered(self) -> None:
         analysis, errors = normalize_ai_analysis_with_errors(
@@ -206,9 +319,9 @@ class AIAnalysisTest(unittest.TestCase):
             AI_MODE_UNHELD,
         )
 
-        self.assertEqual(analysis.positive_points, ["營收年增率維持正值"])
-        self.assertEqual(analysis.risk_points, ["目前 PE 高於三年平均"])
-        self.assertEqual(analysis.watch_points, ["觀察價格與 MA20 的相對位置"])
+        self.assertEqual(analysis_texts(analysis.positive_points), ["營收年增率維持正值"])
+        self.assertEqual(analysis_texts(analysis.risk_points), ["目前 PE 高於三年平均"])
+        self.assertEqual(analysis_texts(analysis.watch_points), ["觀察價格與 MA20 的相對位置"])
         self.assertEqual(errors, [])
         self.assertTrue(analysis.format_valid)
 
@@ -225,7 +338,7 @@ class AIAnalysisTest(unittest.TestCase):
             AI_MODE_UNHELD,
         )
 
-        self.assertEqual(analysis.watch_points, [])
+        self.assertEqual(analysis_texts(analysis.watch_points), [])
         self.assertTrue(any("held-position language" in error for error in errors))
         self.assertFalse(analysis.format_valid)
 
@@ -242,7 +355,7 @@ class AIAnalysisTest(unittest.TestCase):
             AI_MODE_UNHELD,
         )
 
-        self.assertEqual(analysis.risk_points, ["目前 PE 高於三年平均"])
+        self.assertEqual(analysis_texts(analysis.risk_points), ["目前 PE 高於三年平均"])
         self.assertTrue(any("warning: unsupported context" in error for error in errors))
         self.assertTrue(analysis.format_valid)
 
@@ -365,6 +478,62 @@ class AIAnalysisTest(unittest.TestCase):
         self.assertNotIn("constraints", unheld)
         self.assertEqual(held["position"]["average_cost_price_twd"], 490)
         self.assertNotIn("share_count", held["position"])
+
+    def test_feedback_endpoint_updates_summary_counts(self) -> None:
+        engine = create_engine("sqlite:///:memory:", future=True)
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+        with Session() as session:
+            stock = Stock(symbol="4958", name="臻鼎-KY", asset_type="STOCK")
+            session.add(stock)
+            session.commit()
+            session.refresh(stock)
+            row = StockAIAnalysis(
+                stock_id=stock.id,
+                provider="openrouter",
+                model="openai/gpt-oss-120b:free",
+                analysis_mode=AI_MODE_UNHELD,
+                prompt_version=PROMPT_VERSION,
+                analysis_date=date(2026, 6, 29),
+                input_hash="input",
+                request_payload_json='{"evidence":{"quote.current_price_twd":590}}',
+                response_json=(
+                    '{"overall_status":"等待",'
+                    '"summary":{"text":"目前估值、基本面、技術面與籌碼訊號仍然分歧，尚未形成一致方向，適合等待既有資料確認。","evidence_keys":["quote.current_price_twd"]},'
+                    '"positive_points":[],"risk_points":[],"watch_points":[],"disclaimer":"僅供資料整理。","format_valid":true}'
+                ),
+                validation_errors_json="[]",
+                quality_flags_json="[]",
+                grounding_errors_json="[]",
+                status="success",
+                updated_at=datetime(2026, 6, 29, tzinfo=UTC),
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+
+            feedback = submit_stock_ai_analysis_feedback(
+                "4958",
+                AI_MODE_UNHELD,
+                StockAIAnalysisFeedbackRequest(
+                    analysis_id=row.id,
+                    rating="not_useful",
+                    tags=["hallucination"],
+                ),
+                session=session,
+            )
+            summary = ai_analysis_logs_summary(
+                symbol=None,
+                mode=None,
+                provider=None,
+                date_from=None,
+                date_to=None,
+                session=session,
+            )
+
+        self.assertEqual(feedback.status, "ok")
+        self.assertEqual(summary["feedback"]["by_rating"]["not_useful"], 1)
+        self.assertEqual(summary["feedback"]["by_tag"]["hallucination"], 1)
 
 
 if __name__ == "__main__":

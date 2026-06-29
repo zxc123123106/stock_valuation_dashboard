@@ -1314,6 +1314,25 @@ h1 {
   line-height: 1.45;
 }
 
+.ai-feedback-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.feedback-button {
+  min-height: 30px;
+  padding: 0 9px;
+  border-color: var(--line);
+  font-size: 0.78rem;
+}
+
+.feedback-button:disabled {
+  opacity: 0.62;
+  cursor: progress;
+}
+
 .ai-analysis-panel small {
   margin: 0;
 }

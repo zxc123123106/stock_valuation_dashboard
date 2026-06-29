@@ -166,36 +166,37 @@ def apply_futures_snapshot(session, snapshot: FuturesQuoteSnapshot, *, now: date
         row.fetched_at = now
         row.updated_at = now
 
-    _upsert_futures_intraday_point(
-        session,
-        snapshot=snapshot,
-        futures_session=futures_session,
-        session_date=session_date,
-        point_time=point_time,
-        price=snapshot.current_price,
-        difference_percent=snapshot.difference_percent,
-        source=snapshot.source,
-        now=now,
-    )
-
-    heartbeat_time = _as_utc(now).replace(second=0, microsecond=0)
-    quote_age_seconds = (_as_utc(now) - _as_utc(snapshot.price_updated_at)).total_seconds()
-    if (
-        fetch_session.session_type != "closed"
-        and heartbeat_time > _as_utc(point_time)
-        and 0 <= quote_age_seconds <= STALE_AFTER_SECONDS
-    ):
+    if futures_session.session_type != "closed":
         _upsert_futures_intraday_point(
             session,
             snapshot=snapshot,
-            futures_session=fetch_session,
-            session_date=fetch_session.session_date or session_date,
-            point_time=heartbeat_time,
+            futures_session=futures_session,
+            session_date=session_date,
+            point_time=point_time,
             price=snapshot.current_price,
             difference_percent=snapshot.difference_percent,
-            source=f"{snapshot.source} heartbeat",
+            source=snapshot.source,
             now=now,
         )
+
+        heartbeat_time = _as_utc(now).replace(second=0, microsecond=0)
+        quote_age_seconds = (_as_utc(now) - _as_utc(snapshot.price_updated_at)).total_seconds()
+        if (
+            fetch_session.session_type != "closed"
+            and heartbeat_time > _as_utc(point_time)
+            and 0 <= quote_age_seconds <= STALE_AFTER_SECONDS
+        ):
+            _upsert_futures_intraday_point(
+                session,
+                snapshot=snapshot,
+                futures_session=fetch_session,
+                session_date=fetch_session.session_date or session_date,
+                point_time=heartbeat_time,
+                price=snapshot.current_price,
+                difference_percent=snapshot.difference_percent,
+                source=f"{snapshot.source} heartbeat",
+                now=now,
+            )
 
     cutoff = session_date - timedelta(days=14)
     session.execute(delete(FuturesIntradayPoint).where(FuturesIntradayPoint.session_date < cutoff))
@@ -241,11 +242,31 @@ def _upsert_futures_intraday_point(
 
 def backfill_futures_intraday_points(session, snapshot: FuturesQuoteSnapshot) -> int:
     fetch_session = current_futures_session(snapshot.price_updated_at)
-    if fetch_session.session_type == "closed" or fetch_session.session_date is None:
-        return 0
-
     now = datetime.now(UTC)
     count = 0
+
+    if fetch_session.session_type == "closed" or fetch_session.session_date is None:
+        if not _yahoo_fallback_allowed(session, now=now):
+            return 0
+        try:
+            yahoo_points = fetch_yahoo_wtx_chart_points(snapshot.open_price)
+            for futures_session, session_points in _group_points_by_futures_session(yahoo_points).items():
+                count += apply_futures_chart_points(
+                    session,
+                    snapshot,
+                    session_points,
+                    futures_session=futures_session,
+                    source=YAHOO_WTX_SOURCE,
+                    overwrite_existing=False,
+                )
+        except Exception as exc:
+            _record_futures_failure(
+                session,
+                f"WTX Yahoo closed-session chart fallback failed: {exc}",
+                started_at=now,
+            )
+        return count
+
     official_symbol = snapshot.source_symbol or _source_symbol_from_snapshot(snapshot)
     if official_symbol and not (snapshot.source or "").startswith(YAHOO_WTX_SOURCE):
         try:
@@ -681,14 +702,23 @@ def parse_taifex_chart_ticks(
     return parsed
 
 
-def latest_wtx_response(limit: int = 900) -> dict:
-    now = datetime.now(UTC)
+def latest_wtx_response(limit: int = 900, *, now: datetime | None = None, session_factory=None) -> dict:
+    now = now or datetime.now(UTC)
     futures_session = current_futures_session(now)
-    with SessionLocal() as session:
+    session_factory = session_factory or SessionLocal
+    with session_factory() as session:
         snapshot = session.scalar(select(FuturesSnapshot).where(FuturesSnapshot.symbol == WTX_SYMBOL))
+        chart_session = futures_session
+        if futures_session.session_type == "closed":
+            latest_chart_session = _latest_non_closed_chart_session(session)
+            if latest_chart_session:
+                chart_session = latest_chart_session
+            elif snapshot and snapshot.session_type in {"day", "night"}:
+                chart_session = FuturesSession(snapshot.session_type, snapshot.session_label, snapshot.session_date)
+
         if snapshot:
-            session_type = futures_session.session_type if futures_session.session_type != "closed" else snapshot.session_type
-            session_date = futures_session.session_date if futures_session.session_type != "closed" else snapshot.session_date
+            session_type = chart_session.session_type
+            session_date = chart_session.session_date
             points = session.scalars(
                 select(FuturesIntradayPoint)
                 .where(
@@ -709,8 +739,8 @@ def latest_wtx_response(limit: int = 900) -> dict:
         return {
             "symbol": WTX_SYMBOL,
             "name": WTX_NAME,
-            "session_type": futures_session.session_type,
-            "session_label": futures_session.session_label,
+            "session_type": session_type,
+            "session_label": chart_session.session_label,
             "session_start_at": session_start_at,
             "session_end_at": session_end_at,
             "current_price": _optional_float(snapshot.current_price if snapshot else None),
@@ -848,6 +878,41 @@ def _yahoo_fallback_allowed(session, *, now: datetime) -> bool:
     if latest_fetched_at is None:
         return True
     return (_as_utc(now) - _as_utc(latest_fetched_at)).total_seconds() >= YAHOO_FALLBACK_MIN_INTERVAL_SECONDS
+
+
+def _group_points_by_futures_session(
+    points: list[tuple[datetime, Decimal, Decimal]],
+) -> dict[FuturesSession, list[tuple[datetime, Decimal, Decimal]]]:
+    grouped: dict[FuturesSession, list[tuple[datetime, Decimal, Decimal]]] = {}
+    for point in points:
+        futures_session = current_futures_session(point[0])
+        if futures_session.session_type == "closed" or futures_session.session_date is None:
+            continue
+        grouped.setdefault(futures_session, []).append(point)
+    return grouped
+
+
+def _latest_non_closed_chart_session(session) -> FuturesSession | None:
+    row = session.execute(
+        select(
+            FuturesIntradayPoint.session_type,
+            FuturesIntradayPoint.session_date,
+        )
+        .where(
+            FuturesIntradayPoint.symbol == WTX_SYMBOL,
+            FuturesIntradayPoint.session_type.in_(("day", "night")),
+        )
+        .order_by(FuturesIntradayPoint.point_time.desc())
+        .limit(1)
+    ).first()
+    if not row:
+        return None
+    session_type, session_date = row
+    return FuturesSession(
+        session_type,
+        "日盤" if session_type == "day" else "夜盤",
+        session_date,
+    )
 
 
 def _quote_datetime(values: dict) -> datetime:

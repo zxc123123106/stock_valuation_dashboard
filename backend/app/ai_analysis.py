@@ -8,13 +8,13 @@ from typing import Any, Protocol
 
 import requests
 
-from .schemas import StockAIAnalysisContent
+from .schemas import StockAIAnalysisContent, StockAIAnalysisEvidenceText
 
 
 GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_DISCLAIMER = "本分析僅依據既有資料整理，不構成任何投資建議。"
-PROMPT_VERSION = "v2-dual-mode"
+PROMPT_VERSION = "v3-feedback-grounded"
 AI_MODE_GENERAL = "GENERAL"
 AI_MODE_UNHELD = "UNHELD"
 AI_MODE_HELD = "HELD"
@@ -73,6 +73,8 @@ class AIProviderResult:
     raw_response_text: str
     provider_metadata: dict[str, Any]
     validation_errors: list[str]
+    quality_flags: list[str]
+    grounding_errors: list[str]
 
 
 class AIProvider(Protocol):
@@ -113,7 +115,11 @@ class GeminiProvider:
         _raise_for_provider_error(response, "Gemini")
         data = response.json()
         raw_text = _gemini_text(data)
-        analysis, errors = normalize_ai_analysis_with_errors(raw_text, analysis_mode)
+        analysis, errors = normalize_ai_analysis_with_errors(
+            raw_text,
+            analysis_mode,
+            evidence_keys=extract_evidence_keys(stock_summary),
+        )
         candidate = (data.get("candidates") or [{}])[0]
         return AIProviderResult(
             analysis=analysis,
@@ -125,6 +131,8 @@ class GeminiProvider:
                 "usage": data.get("usageMetadata"),
             },
             validation_errors=errors,
+            quality_flags=quality_flags_from_validation_errors(errors),
+            grounding_errors=grounding_errors_from_validation_errors(errors),
         )
 
 
@@ -176,7 +184,11 @@ class OpenRouterProvider:
         choice = choices[0]
         message = choice.get("message") or {}
         raw_text = _message_content_text(message)
-        analysis, errors = normalize_ai_analysis_with_errors(raw_text, analysis_mode)
+        analysis, errors = normalize_ai_analysis_with_errors(
+            raw_text,
+            analysis_mode,
+            evidence_keys=extract_evidence_keys(stock_summary),
+        )
         return AIProviderResult(
             analysis=analysis,
             raw_response_text=raw_text,
@@ -190,6 +202,8 @@ class OpenRouterProvider:
                 "routing_fallback_reason": routing_fallback_reason,
             },
             validation_errors=errors,
+            quality_flags=quality_flags_from_validation_errors(errors),
+            grounding_errors=grounding_errors_from_validation_errors(errors),
         )
 
     def _post(self, payload: dict[str, Any]) -> requests.Response:
@@ -241,26 +255,90 @@ def stock_summary_hash(stock_summary: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def extract_evidence_keys(stock_summary: dict[str, Any]) -> set[str] | None:
+    evidence = stock_summary.get("evidence") if isinstance(stock_summary, dict) else None
+    if not isinstance(evidence, dict):
+        return None
+    return {str(key) for key in evidence.keys()}
+
+
+def quality_flags_from_validation_errors(errors: list[str]) -> list[str]:
+    flags: set[str] = set()
+    for error in errors:
+        lower = str(error).lower()
+        if "invalid evidence key" in lower or "missing evidence key" in lower:
+            flags.add("grounding_error")
+        if "unsupported status" in lower:
+            flags.add("wrong_status")
+        if "private position" in lower:
+            flags.add("private_position_leak")
+        if "unsupported context" in lower:
+            flags.add("unsupported_context")
+        if "missing data presented" in lower:
+            flags.add("missing_data_as_finding")
+        if "not a json" in lower or "missing required field" in lower:
+            flags.add("format_issue")
+        if "mechanical estimate misrepresented" in lower:
+            flags.add("valuation_misrepresentation")
+        if "malformed content" in lower:
+            flags.add("malformed_content")
+    return sorted(flags)
+
+
+def grounding_errors_from_validation_errors(errors: list[str]) -> list[str]:
+    return [
+        str(error)
+        for error in errors
+        if "invalid evidence key" in str(error).lower() or "missing evidence key" in str(error).lower()
+    ]
+
+
 def analysis_json_schema(analysis_mode: str) -> dict[str, Any]:
     allowed = list(_allowed_statuses(analysis_mode))
+    grounded_text_schema = {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "minLength": 1, "maxLength": 360},
+            "evidence_keys": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": 120},
+                "maxItems": 5,
+            },
+        },
+        "required": ["text", "evidence_keys"],
+        "additionalProperties": False,
+    }
+    grounded_point_schema = {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "minLength": 1, "maxLength": 80},
+            "evidence_keys": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": 120},
+                "maxItems": 5,
+            },
+        },
+        "required": ["text", "evidence_keys"],
+        "additionalProperties": False,
+    }
     return {
         "type": "object",
         "properties": {
             "overall_status": {"type": "string", "enum": allowed},
-            "summary": {"type": "string", "minLength": 40, "maxLength": 360},
+            "summary": grounded_text_schema,
             "positive_points": {
                 "type": "array",
-                "items": {"type": "string", "maxLength": 80},
+                "items": grounded_point_schema,
                 "maxItems": 5,
             },
             "risk_points": {
                 "type": "array",
-                "items": {"type": "string", "maxLength": 80},
+                "items": grounded_point_schema,
                 "maxItems": 5,
             },
             "watch_points": {
                 "type": "array",
-                "items": {"type": "string", "maxLength": 80},
+                "items": grounded_point_schema,
                 "maxItems": 5,
             },
             "disclaimer": {"type": "string", "maxLength": 120},
@@ -277,14 +355,19 @@ def analysis_json_schema(analysis_mode: str) -> dict[str, Any]:
     }
 
 
-def normalize_ai_analysis(value: Any, analysis_mode: str = AI_MODE_GENERAL) -> StockAIAnalysisContent:
-    analysis, _ = normalize_ai_analysis_with_errors(value, analysis_mode)
+def normalize_ai_analysis(
+    value: Any,
+    analysis_mode: str = AI_MODE_GENERAL,
+    evidence_keys: set[str] | None = None,
+) -> StockAIAnalysisContent:
+    analysis, _ = normalize_ai_analysis_with_errors(value, analysis_mode, evidence_keys=evidence_keys)
     return analysis
 
 
 def normalize_ai_analysis_with_errors(
     value: Any,
     analysis_mode: str,
+    evidence_keys: set[str] | None = None,
 ) -> tuple[StockAIAnalysisContent, list[str]]:
     errors: list[str] = []
     payload = value
@@ -311,18 +394,40 @@ def normalize_ai_analysis_with_errors(
         errors.append(f"Unsupported status for {analysis_mode}: {status}")
         status = _fallback_status(analysis_mode)
 
-    summary = _sanitize_summary(
-        _clean_text(payload.get("summary"), "AI 暫時沒有產生摘要。", 360),
+    summary = _sanitize_grounded_text(
+        payload.get("summary"),
+        "summary",
         analysis_mode,
         errors,
+        evidence_keys,
+        360,
+        require_evidence=evidence_keys is not None,
     )
-    positive_points = _sanitize_points(payload.get("positive_points"), "positive_points", analysis_mode, errors)
-    risk_points = _sanitize_points(payload.get("risk_points"), "risk_points", analysis_mode, errors)
-    watch_points = _sanitize_points(payload.get("watch_points"), "watch_points", analysis_mode, errors)
+    positive_points = _sanitize_points(
+        payload.get("positive_points"),
+        "positive_points",
+        analysis_mode,
+        errors,
+        evidence_keys,
+    )
+    risk_points = _sanitize_points(
+        payload.get("risk_points"),
+        "risk_points",
+        analysis_mode,
+        errors,
+        evidence_keys,
+    )
+    watch_points = _sanitize_points(
+        payload.get("watch_points"),
+        "watch_points",
+        analysis_mode,
+        errors,
+        evidence_keys,
+    )
 
-    if summary == "AI 暫時沒有產生摘要。":
+    if summary.text == "AI 暫時沒有產生摘要。":
         errors.append("Summary is empty or missing.")
-    elif len(summary) < 40:
+    elif len(summary.text) < 40:
         errors.append("Summary is shorter than 40 characters.")
 
     return StockAIAnalysisContent(
@@ -365,13 +470,17 @@ def _analysis_prompts(stock_summary: dict[str, Any], analysis_mode: str) -> Anal
         "volume_as_percent_of_ma20 是今日量占20日均量的比例；低於100代表量縮。"
         "volume_difference_vs_ma20_percent 才是今日量相對20日均量的增減百分比。"
         "不得自行重新計算後改寫輸入數字。不得承諾報酬或給出確定性買賣指令。"
+        "stock_summary.evidence 是唯一可引用的證據清單。summary、positive_points、risk_points、watch_points "
+        "每一項都必須是 {\"text\": \"...\", \"evidence_keys\": [\"...\"]}，且 evidence_keys 只能使用 evidence 中存在的 key。"
+        "每個非空結論至少綁定一個 evidence key；若沒有足夠證據，請降低結論強度並使用資料不足。"
         "輸出鍵名必須完全使用 overall_status、summary、positive_points、risk_points、watch_points、disclaimer，"
-        "不得改名為 positives、risks、next_steps 或其他名稱。三個 points 欄位都必須是 JSON string array。"
+        "不得改名為 positives、risks、next_steps 或其他名稱。"
         "只輸出符合 JSON schema 的一個 JSON object，不要 Markdown、code fence、推理過程或額外說明。"
     )
     user = (
         f"analysis_mode: {analysis_mode}\n"
-        "請以繁體中文輸出 80 到 140 字摘要，以及最多五點正面因素、風險因素與後續觀察。\n\n"
+        "請以繁體中文輸出 80 到 140 字摘要，以及最多五點正面因素、風險因素與後續觀察。"
+        "每個 text 只寫結論，不要在文字中列出 evidence key。\n\n"
         f"stock_summary:\n{json.dumps(stock_summary, ensure_ascii=False, indent=2)}"
     )
     return AnalysisPrompts(system=system, user=user)
@@ -390,15 +499,27 @@ def _raise_for_provider_error(response: requests.Response, provider_name: str) -
         response.raise_for_status()
     except requests.HTTPError as exc:
         message = f"{provider_name} API request failed with status {response.status_code}."
+        raw_body = (getattr(response, "text", "") or "").strip()
         try:
             body = response.json()
             provider_error = body.get("error") if isinstance(body, dict) else None
             if isinstance(provider_error, dict):
-                message = f"{message} {provider_error.get('message') or provider_error.get('code') or ''}".strip()
+                provider_message = provider_error.get("message") or provider_error.get("code") or ""
+                metadata = provider_error.get("metadata")
+                if isinstance(metadata, dict):
+                    metadata_message = metadata.get("raw") or metadata.get("reason") or metadata.get("message")
+                    if metadata_message and str(metadata_message) not in str(provider_message):
+                        provider_message = f"{provider_message} {metadata_message}".strip()
+                message = f"{message} {provider_message}".strip()
             elif isinstance(provider_error, str):
                 message = f"{message} {provider_error}"
         except ValueError:
-            pass
+            if raw_body:
+                message = f"{message} {raw_body[:300]}".strip()
+        if response.status_code == 429:
+            message = f"{message} 免費模型或供應商目前達到速率限制，請稍後重試或切換模型。"
+        elif response.status_code in {500, 502, 503, 504}:
+            message = f"{message} 模型供應商暫時不可用，請稍後重試；若已有快取，系統會保留最近成功分析。"
         raise AIAnalysisError(message) from exc
 
 
@@ -552,30 +673,97 @@ def _split_loose_items(value: str | None) -> list[str]:
     return _clean_list([part.lstrip("-•0123456789.、) ").strip() for part in parts], 5, 80)
 
 
-def _sanitize_summary(value: str, analysis_mode: str, errors: list[str]) -> str:
-    sentences = re.split(r"(?<=[。！？!?])\s*", value)
+def _sanitize_grounded_text(
+    value: Any,
+    field: str,
+    analysis_mode: str,
+    errors: list[str],
+    evidence_keys: set[str] | None,
+    text_limit: int,
+    require_evidence: bool = False,
+) -> StockAIAnalysisEvidenceText:
+    text, keys = _coerce_grounded_text(value, text_limit)
+    sentences = re.split(r"(?<=[。！？!?])\s*", text)
     kept = []
     for sentence in sentences:
         if not sentence:
             continue
         violation = _validation_violation(sentence, analysis_mode)
         if violation:
-            errors.append(f"summary: {violation}")
+            errors.append(f"{field}: {violation}")
             continue
         kept.append(sentence)
-    return "".join(kept).strip() or "AI 暫時沒有產生摘要。"
+    cleaned_text = "".join(kept).strip() or "AI 暫時沒有產生摘要。"
+    valid_keys = _validate_evidence_keys(field, keys, evidence_keys, errors, require_evidence and cleaned_text)
+    return StockAIAnalysisEvidenceText(text=cleaned_text, evidence_keys=valid_keys)
 
 
-def _sanitize_points(value: Any, field: str, analysis_mode: str, errors: list[str]) -> list[str]:
-    cleaned = _clean_list(value, 5, 80)
+def _sanitize_points(
+    value: Any,
+    field: str,
+    analysis_mode: str,
+    errors: list[str],
+    evidence_keys: set[str] | None,
+) -> list[StockAIAnalysisEvidenceText]:
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = []
     kept = []
-    for item in cleaned:
-        violation = _validation_violation(item, analysis_mode)
+    for index, item in enumerate(items[:5]):
+        grounded = _sanitize_grounded_text(
+            item,
+            f"{field}[{index}]",
+            analysis_mode,
+            errors,
+            evidence_keys,
+            80,
+            require_evidence=evidence_keys is not None,
+        )
+        if grounded.text == "AI 暫時沒有產生摘要。":
+            continue
+        violation = _validation_violation(grounded.text, analysis_mode)
         if violation:
             errors.append(f"{field}: {violation}")
             continue
-        kept.append(item)
+        kept.append(grounded)
     return kept
+
+
+def _coerce_grounded_text(value: Any, text_limit: int) -> tuple[str, list[str]]:
+    if isinstance(value, StockAIAnalysisEvidenceText):
+        return value.text[:text_limit], list(value.evidence_keys or [])
+    if isinstance(value, dict):
+        text = _clean_text(value.get("text"), "AI 暫時沒有產生摘要。", text_limit)
+        raw_keys = value.get("evidence_keys")
+        keys = [str(key).strip() for key in raw_keys if str(key).strip()] if isinstance(raw_keys, list) else []
+        return text, keys[:5]
+    return _clean_text(value, "AI 暫時沒有產生摘要。", text_limit), []
+
+
+def _validate_evidence_keys(
+    field: str,
+    keys: list[str],
+    allowed_keys: set[str] | None,
+    errors: list[str],
+    require_evidence: bool | str,
+) -> list[str]:
+    if allowed_keys is None:
+        return keys
+    valid = []
+    invalid = []
+    for key in keys:
+        if key in allowed_keys:
+            valid.append(key)
+        else:
+            invalid.append(key)
+    if invalid:
+        errors.append(f"{field}: invalid evidence key(s): {', '.join(invalid[:5])}")
+    if require_evidence and not valid:
+        errors.append(f"{field}: missing evidence key")
+    return valid
 
 
 def _validation_violation(text: str, analysis_mode: str) -> str | None:
@@ -602,10 +790,15 @@ def _plain_text_analysis(text: str, analysis_mode: str) -> StockAIAnalysisConten
     summary = re.sub(r"\s+", " ", text).strip()
     return StockAIAnalysisContent(
         overall_status=_fallback_status(analysis_mode),
-        summary=_clean_text(summary, "AI 已回覆，但格式不是 JSON。", 360),
+        summary=StockAIAnalysisEvidenceText(
+            text=_clean_text(summary, "AI 已回覆，但格式不是 JSON。", 360),
+            evidence_keys=[],
+        ),
         positive_points=[],
         risk_points=[],
-        watch_points=["可重新產生 AI 分析以取得結構化摘要。"],
+        watch_points=[
+            StockAIAnalysisEvidenceText(text="可重新產生 AI 分析以取得結構化摘要。", evidence_keys=[])
+        ],
         disclaimer=DEFAULT_DISCLAIMER,
         format_valid=False,
     )

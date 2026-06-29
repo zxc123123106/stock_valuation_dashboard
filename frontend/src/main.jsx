@@ -49,6 +49,13 @@ import "./styles.css";
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 const POLL_SECONDS = 5;
 const BACKGROUND_REFRESH_SECONDS = 60;
+const AI_ANALYSIS_POLL_SECONDS = 10;
+const AI_FEEDBACK_TAGS = [
+  { label: "不準", tag: "wrong_number" },
+  { label: "幻覺", tag: "hallucination" },
+  { label: "太籠統", tag: "too_generic" },
+  { label: "狀態不合理", tag: "wrong_status" },
+];
 const MA_PERIODS = [5, 10, 20, 60, 120, 240];
 const MA_VISIBILITY_STORAGE_KEY = "stock-dashboard-visible-ma-lines";
 const AI_MODE_STORAGE_PREFIX = "stock-dashboard-ai-analysis-mode";
@@ -1938,6 +1945,21 @@ function mergeAiAnalysisResponse(current, next) {
   };
 }
 
+function aiText(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value && typeof value === "object") {
+    return value.text || "";
+  }
+  return "";
+}
+
+function aiItemKey(item, index) {
+  const text = aiText(item);
+  return `${index}-${text}`;
+}
+
 function AIAnalysisPopover({
   stock,
   open,
@@ -1953,7 +1975,10 @@ function AIAnalysisPopover({
   const [activeMode, setActiveMode] = useState(() => loadAiMode(stock.symbol, hasPosition));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [feedbackStatus, setFeedbackStatus] = useState("");
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState("");
   const [panelStyle, setPanelStyle] = useState({});
+  const runningAnalysisInResponse = hasRunningAiAnalysis(analysisResponse);
 
   const loadLatestAnalysis = useCallback(
     async ({ signal, showLoading = false } = {}) => {
@@ -1994,6 +2019,8 @@ function AIAnalysisPopover({
   useEffect(() => {
     setAnalysisResponse(null);
     setError("");
+    setFeedbackStatus("");
+    setFeedbackSubmitting("");
     setActiveMode(loadAiMode(stock.symbol, hasPosition));
   }, [stock.symbol]);
 
@@ -2021,14 +2048,14 @@ function AIAnalysisPopover({
   }, [loadLatestAnalysis, open, stock.symbol]);
 
   useEffect(() => {
-    if (!analysisPending && !hasRunningAiAnalysis(analysisResponse)) {
+    if (!analysisPending && !runningAnalysisInResponse) {
       return undefined;
     }
     const intervalId = window.setInterval(() => {
       loadLatestAnalysis();
-    }, 3000);
+    }, AI_ANALYSIS_POLL_SECONDS * 1000);
     return () => window.clearInterval(intervalId);
-  }, [analysisPending, analysisResponse, loadLatestAnalysis]);
+  }, [analysisPending, runningAnalysisInResponse, loadLatestAnalysis]);
 
   useEffect(() => {
     if (!open) {
@@ -2123,6 +2150,37 @@ function AIAnalysisPopover({
     }
   }
 
+  async function submitFeedback(rating, tags = []) {
+    if (!result?.id || feedbackSubmitting) {
+      return;
+    }
+    const key = rating === "useful" ? "useful" : tags[0] || "not_useful";
+    setFeedbackSubmitting(key);
+    setFeedbackStatus("");
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/stocks/${stock.symbol}/ai-analysis/${activeMode}/feedback`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            analysis_id: result.id,
+            rating,
+            tags,
+          }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(await parseError(response));
+      }
+      setFeedbackStatus("已記錄回饋");
+    } catch (requestError) {
+      setFeedbackStatus(requestError.message);
+    } finally {
+      setFeedbackSubmitting("");
+    }
+  }
+
   if (!open) {
     return null;
   }
@@ -2202,12 +2260,36 @@ function AIAnalysisPopover({
               <span>{activeMode === "HELD" ? "持有判斷" : "進場判斷"}</span>
               <strong>{analysis.overall_status}</strong>
             </div>
-            <p>{analysis.summary}</p>
+            <p>{aiText(analysis.summary)}</p>
             <div className="ai-analysis-lists">
               <AIAnalysisList title="正面因素" items={analysis.positive_points} />
               <AIAnalysisList title="風險因素" items={analysis.risk_points} />
               <AIAnalysisList title="後續觀察" items={analysis.watch_points} />
             </div>
+            <div className="ai-feedback-row" aria-label="AI 分析回饋">
+              <button
+                type="button"
+                className="text-button feedback-button"
+                disabled={feedbackSubmitting !== ""}
+                onClick={() => submitFeedback("useful", [])}
+              >
+                {feedbackSubmitting === "useful" ? <Loader2 className="spin" size={14} /> : <CheckCircle2 size={14} />}
+                有幫助
+              </button>
+              {AI_FEEDBACK_TAGS.map((item) => (
+                <button
+                  key={item.tag}
+                  type="button"
+                  className="text-button feedback-button"
+                  disabled={feedbackSubmitting !== ""}
+                  onClick={() => submitFeedback("not_useful", [item.tag])}
+                >
+                  {feedbackSubmitting === item.tag && <Loader2 className="spin" size={14} />}
+                  {item.label}
+                </button>
+              ))}
+            </div>
+            {feedbackStatus && <small>{feedbackStatus}</small>}
             <small>
               {result.provider} · {result.model}
               {result.cached ? " · 使用快取" : " · 新產生"}
@@ -2235,8 +2317,8 @@ function AIAnalysisList({ title, items }) {
     <div>
       <strong>{title}</strong>
       <ul>
-        {displayItems.map((item) => (
-          <li key={`${title}-${item}`}>{item}</li>
+        {displayItems.map((item, index) => (
+          <li key={`${title}-${aiItemKey(item, index)}`}>{aiText(item)}</li>
         ))}
       </ul>
     </div>
