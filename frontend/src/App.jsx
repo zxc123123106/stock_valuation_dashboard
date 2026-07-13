@@ -1,11 +1,10 @@
-import React, { useRef } from "react";
+import React from "react";
 
 import { FuturesTrackerCard } from "./components/futures/FuturesWidget";
 import { DashboardHeader } from "./components/dashboard/DashboardHeader";
 import { DashboardSummary } from "./components/dashboard/DashboardSummary";
 import { DashboardToolbar } from "./components/dashboard/DashboardToolbar";
 import { StockList } from "./components/stocks/StockList";
-import { useAIAnalysis } from "./hooks/useAIAnalysis";
 import { useDashboardData } from "./hooks/useDashboardData";
 import { useStockActions } from "./hooks/useStockActions";
 import { useStockSorting } from "./hooks/useStockSorting";
@@ -13,14 +12,11 @@ import { AlertCircle } from "lucide-react";
 
 const POLL_SECONDS = 5;
 export default function App() {
-  const reorderingRef = useRef(false);
   const {
     stocks,
-    setStocks,
     futuresData,
     metadata,
     brokerSetting,
-    setBrokerSetting,
     refreshStatus,
     symbolInput,
     setSymbolInput,
@@ -30,8 +26,7 @@ export default function App() {
     message,
     setMessage,
     now,
-    loadData,
-  } = useDashboardData({ pollSeconds: POLL_SECONDS, reorderingRef });
+  } = useDashboardData({ pollSeconds: POLL_SECONDS, futuresPollSeconds: 10 });
   const {
     queueRefreshSymbol,
     queueRefreshAll,
@@ -40,16 +35,9 @@ export default function App() {
     clearPosition,
     updateBroker,
   } = useStockActions({
-    loadData,
-    setStocks,
-    setBrokerSetting,
     setError,
     setMessage,
   });
-  const {
-    pendingBySymbol: aiAnalysisPendingBySymbol,
-    setPending: setAiAnalysisPending,
-  } = useAIAnalysis();
   const {
     sensors,
     orderedStocks,
@@ -62,10 +50,8 @@ export default function App() {
     handleDragEnd,
   } = useStockSorting({
     stocks,
-    setStocks,
     setError,
     setMessage,
-    reorderingRef,
   });
 
   return (
@@ -108,8 +94,6 @@ export default function App() {
         moveStock={moveStock}
         handleDragStart={handleDragStart}
         handleDragEnd={handleDragEnd}
-        aiAnalysisPendingBySymbol={aiAnalysisPendingBySymbol}
-        setAiAnalysisPending={setAiAnalysisPending}
         queueRefreshSymbol={queueRefreshSymbol}
         deleteStock={deleteStock}
         savePosition={savePosition}
@@ -124,7 +108,6 @@ export default function App() {
   );
 
 }
-
 
 
 

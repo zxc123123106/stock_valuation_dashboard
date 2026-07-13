@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, ChevronDown, ChevronRight, Loader2, Wifi } from "lucide-react";
 import { CandlestickSeries, CrosshairMode, LineSeries, createChart } from "lightweight-charts";
+import { useQuery } from "@tanstack/react-query";
 
-import { API_BASE_URL, parseError } from "../../api/client";
+import { queryKeys } from "../../api/queryKeys";
+import { getTechnicalAnalysis } from "../../api/stocks";
 import { DataQualityBadge } from "../shared/DataQualityBadge";
 import {
   formatDate,
@@ -52,41 +54,16 @@ function storeMaVisibility(visibility) {
 
 
 export function TechnicalAnalysisDisclosure({ symbol, metricUpdatedAt, quality, expanded, onToggle }) {
-  const [analysis, setAnalysis] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    if (!expanded) {
-      return undefined;
-    }
-
-    const controller = new AbortController();
-    async function loadTechnicalAnalysis() {
-      setLoading(true);
-      setError("");
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/stocks/${symbol}/technical-analysis?limit=120`, {
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          throw new Error(await parseError(response));
-        }
-        setAnalysis(await response.json());
-      } catch (requestError) {
-        if (requestError.name !== "AbortError") {
-          setError(requestError.message);
-        }
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-        }
-      }
-    }
-
-    loadTechnicalAnalysis();
-    return () => controller.abort();
-  }, [expanded, metricUpdatedAt, symbol]);
+  const analysisQuery = useQuery({
+    queryKey: queryKeys.technicalAnalysis(symbol, metricUpdatedAt),
+    queryFn: ({ signal }) => getTechnicalAnalysis(symbol, signal),
+    enabled: Boolean(expanded && symbol),
+    staleTime: 60 * 1000,
+    placeholderData: (previous) => previous,
+  });
+  const analysis = analysisQuery.data || null;
+  const loading = analysisQuery.isPending || analysisQuery.isFetching;
+  const error = analysisQuery.error?.message || "";
 
   return (
     <div className="technical-analysis">

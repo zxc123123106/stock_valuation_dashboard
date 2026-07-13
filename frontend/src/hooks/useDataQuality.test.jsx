@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { useDataQuality } from "./useDataQuality";
 import { getDataQuality } from "../api/stocks";
+import { queryWrapper } from "../test/queryClient";
 
 
 vi.mock("../api/stocks", () => ({ getDataQuality: vi.fn() }));
@@ -12,11 +13,13 @@ describe("useDataQuality", () => {
     getDataQuality.mockResolvedValue({ overall_status: "HEALTHY", items: [] });
     const { result, rerender } = renderHook(
       ({ open }) => useDataQuality("2330", open, 60),
-      { initialProps: { open: false } },
+      { initialProps: { open: false }, wrapper: queryWrapper() },
     );
     expect(getDataQuality).not.toHaveBeenCalled();
     rerender({ open: true });
     await waitFor(() => expect(result.current.quality?.overall_status).toBe("HEALTHY"));
+    expect(getDataQuality).toHaveBeenCalledTimes(1);
+    rerender({ open: false });
     expect(getDataQuality).toHaveBeenCalledTimes(1);
   });
 });

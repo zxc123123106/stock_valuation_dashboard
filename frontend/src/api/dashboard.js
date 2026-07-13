@@ -1,4 +1,9 @@
-import { requestJson } from "./client";
+import { requestEtagJson, requestJson } from "./client";
+
+
+export function getDashboardSnapshot(options) {
+  return requestEtagJson("/api/dashboard/snapshot", options);
+}
 
 
 export function getStocks(options) {

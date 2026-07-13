@@ -25,6 +25,7 @@ class RouterContractTest(unittest.TestCase):
         expected = {
             ("GET", "/api/health"),
             ("GET", "/api/metadata"),
+            ("GET", "/api/dashboard/snapshot"),
             ("GET", "/api/stocks"),
             ("POST", "/api/stocks/refresh"),
             ("GET", "/api/refresh/status"),

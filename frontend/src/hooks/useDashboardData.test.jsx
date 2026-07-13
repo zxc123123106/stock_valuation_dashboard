@@ -1,22 +1,25 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { focusManager } from "@tanstack/react-query";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useDashboardData } from "./useDashboardData";
 import * as dashboardApi from "../api/dashboard";
+import { queryWrapper } from "../test/queryClient";
 
 
 vi.mock("../api/dashboard", () => ({
-  getStocks: vi.fn(),
-  getMetadata: vi.fn(),
-  getRefreshStatus: vi.fn(),
+  getDashboardSnapshot: vi.fn(),
   getBrokerSetting: vi.fn(),
   getWtxFutures: vi.fn(),
 }));
 
 function seedResponses() {
-  dashboardApi.getStocks.mockResolvedValue([{ symbol: "2330", display_order: 10 }]);
-  dashboardApi.getMetadata.mockResolvedValue({ api_version: "0.1.0" });
-  dashboardApi.getRefreshStatus.mockResolvedValue({ status: "idle", symbols: [], queue_length: 0 });
+  dashboardApi.getDashboardSnapshot.mockResolvedValue({
+    revision: "one",
+    stocks: [{ symbol: "2330", display_order: 10 }],
+    metadata: { api_version: "0.1.0" },
+    refresh_status: { status: "idle", symbols: [], queue_length: 0 },
+  });
   dashboardApi.getBrokerSetting.mockResolvedValue({ selected: { broker_id: "CATHAY" } });
   dashboardApi.getWtxFutures.mockResolvedValue({ symbol: "WTX&" });
 }
@@ -25,29 +28,39 @@ describe("useDashboardData", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     seedResponses();
+    focusManager.setFocused(true);
   });
 
-  it("loads the dashboard and refreshes on focus", async () => {
-    const reorderingRef = { current: false };
-    const { result } = renderHook(() => useDashboardData({ pollSeconds: 60, reorderingRef }));
+  afterEach(() => {
+    focusManager.setFocused(undefined);
+    vi.useRealTimers();
+  });
+
+  it("loads one dashboard snapshot plus independent broker and WTX queries", async () => {
+    const { result } = renderHook(
+      () => useDashboardData({ pollSeconds: 60, futuresPollSeconds: 60 }),
+      { wrapper: queryWrapper() },
+    );
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.stocks[0].symbol).toBe("2330");
-    act(() => window.dispatchEvent(new Event("focus")));
-    await waitFor(() => expect(dashboardApi.getStocks).toHaveBeenCalledTimes(2));
+    expect(dashboardApi.getDashboardSnapshot).toHaveBeenCalledTimes(1);
+    expect(dashboardApi.getBrokerSetting).toHaveBeenCalledTimes(1);
+    expect(dashboardApi.getWtxFutures).toHaveBeenCalledTimes(1);
   });
 
-  it("deduplicates overlapping refresh calls", async () => {
-    let resolveStocks;
-    dashboardApi.getStocks.mockImplementationOnce(() => new Promise((resolve) => { resolveStocks = resolve; }));
-    const reorderingRef = { current: false };
-    const { result } = renderHook(() => useDashboardData({ pollSeconds: 60, reorderingRef }));
-    await waitFor(() => expect(dashboardApi.getStocks).toHaveBeenCalledTimes(1));
-    act(() => {
-      result.current.loadData();
-      result.current.loadData();
-    });
-    expect(dashboardApi.getStocks).toHaveBeenCalledTimes(1);
-    await act(async () => resolveStocks([{ symbol: "0050", display_order: 10 }]));
-    await waitFor(() => expect(result.current.stocks[0].symbol).toBe("0050"));
+  it("refreshes dashboard and WTX once when the window regains focus", async () => {
+    renderHook(
+      () => useDashboardData({ pollSeconds: 60, futuresPollSeconds: 60 }),
+      { wrapper: queryWrapper() },
+    );
+    await waitFor(() => expect(dashboardApi.getDashboardSnapshot).toHaveBeenCalled());
+    const dashboardCalls = dashboardApi.getDashboardSnapshot.mock.calls.length;
+    const futuresCalls = dashboardApi.getWtxFutures.mock.calls.length;
+    const brokerCalls = dashboardApi.getBrokerSetting.mock.calls.length;
+    act(() => focusManager.setFocused(false));
+    act(() => focusManager.setFocused(true));
+    await waitFor(() => expect(dashboardApi.getDashboardSnapshot).toHaveBeenCalledTimes(dashboardCalls + 1));
+    expect(dashboardApi.getWtxFutures).toHaveBeenCalledTimes(futuresCalls + 1);
+    expect(dashboardApi.getBrokerSetting).toHaveBeenCalledTimes(brokerCalls);
   });
 });

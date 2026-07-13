@@ -1,13 +1,12 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertCircle, CheckCircle2, Loader2, Sparkles, X } from "lucide-react";
 
-import { API_BASE_URL, parseError } from "../../api/client";
 import { DataQualityBadge } from "../shared/DataQualityBadge";
+import { useAIAnalysis } from "../../hooks/useAIAnalysis";
 import { formatDate } from "../../utils/formatters";
 
 
-const AI_ANALYSIS_POLL_SECONDS = 10;
 const AI_MODE_STORAGE_PREFIX = "stock-dashboard-ai-analysis-mode";
 const AI_FEEDBACK_TAGS = [
   { label: "不準", tag: "wrong_number" },
@@ -32,27 +31,6 @@ function loadAiMode(symbol, hasPosition) {
   return hasPosition ? "HELD" : "UNHELD";
 }
 
-function hasRunningAiAnalysis(response) {
-  return Boolean(response?.running?.unheld || response?.running?.held);
-}
-
-function mergeAiAnalysisResponse(current, next) {
-  if (!current || !next) {
-    return next;
-  }
-  return {
-    ...next,
-    analyses: {
-      unheld: next.analyses?.unheld || current.analyses?.unheld || null,
-      held: next.analyses?.held || current.analyses?.held || null,
-    },
-    rule_based: {
-      unheld: next.rule_based?.unheld || current.rule_based?.unheld || null,
-      held: next.rule_based?.held || current.rule_based?.held || null,
-    },
-  };
-}
-
 function aiText(value) {
   if (typeof value === "string") {
     return value;
@@ -73,62 +51,23 @@ export function AIAnalysisPopover({
   open,
   anchorRef,
   onClose,
-  analysisPending = false,
-  onAnalysisPendingChange = () => {},
 }) {
   const hasPosition = Boolean(stock.position);
   const panelRef = useRef(null);
-  const generationActiveRef = useRef(false);
-  const [analysisResponse, setAnalysisResponse] = useState(null);
   const [activeMode, setActiveMode] = useState(() => loadAiMode(stock.symbol, hasPosition));
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [feedbackStatus, setFeedbackStatus] = useState("");
-  const [feedbackSubmitting, setFeedbackSubmitting] = useState("");
   const [panelStyle, setPanelStyle] = useState({});
-  const runningAnalysisInResponse = hasRunningAiAnalysis(analysisResponse);
-
-  const loadLatestAnalysis = useCallback(
-    async ({ signal, showLoading = false } = {}) => {
-      if (showLoading) {
-        setLoading(true);
-      }
-      setError("");
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/stocks/${stock.symbol}/ai-analysis/latest`, {
-          signal,
-        });
-        if (!response.ok) {
-          throw new Error(await parseError(response));
-        }
-        const payload = await response.json();
-        setAnalysisResponse((current) => mergeAiAnalysisResponse(current, payload));
-        const running = hasRunningAiAnalysis(payload);
-        if (running) {
-          onAnalysisPendingChange(true);
-        } else if (!generationActiveRef.current) {
-          onAnalysisPendingChange(false);
-        }
-        return payload;
-      } catch (requestError) {
-        if (requestError.name !== "AbortError") {
-          setError(requestError.message);
-        }
-        return null;
-      } finally {
-        if (!signal?.aborted && showLoading) {
-          setLoading(false);
-        }
-      }
-    },
-    [onAnalysisPendingChange, stock.symbol],
-  );
+  const {
+    analysisResponse,
+    loading,
+    running,
+    error,
+    generate,
+    submitFeedback: submitAnalysisFeedback,
+    feedbackStatus,
+    feedbackSubmitting,
+  } = useAIAnalysis(stock, open);
 
   useEffect(() => {
-    setAnalysisResponse(null);
-    setError("");
-    setFeedbackStatus("");
-    setFeedbackSubmitting("");
     setActiveMode(loadAiMode(stock.symbol, hasPosition));
   }, [stock.symbol]);
 
@@ -145,25 +84,6 @@ export function AIAnalysisPopover({
       // The panel remains usable without persistent storage.
     }
   }, [activeMode, stock.symbol]);
-
-  useEffect(() => {
-    if (!open) {
-      return undefined;
-    }
-    const controller = new AbortController();
-    loadLatestAnalysis({ signal: controller.signal, showLoading: true });
-    return () => controller.abort();
-  }, [loadLatestAnalysis, open, stock.symbol]);
-
-  useEffect(() => {
-    if (!analysisPending && !runningAnalysisInResponse) {
-      return undefined;
-    }
-    const intervalId = window.setInterval(() => {
-      loadLatestAnalysis();
-    }, AI_ANALYSIS_POLL_SECONDS * 1000);
-    return () => window.clearInterval(intervalId);
-  }, [analysisPending, runningAnalysisInResponse, loadLatestAnalysis]);
 
   useEffect(() => {
     if (!open) {
@@ -225,68 +145,11 @@ export function AIAnalysisPopover({
   }, [anchorRef, onClose, open]);
 
   async function generateAnalysis() {
-    if (analysisPending || hasRunningAiAnalysis(analysisResponse)) {
-      return;
-    }
-    generationActiveRef.current = true;
-    onAnalysisPendingChange(true);
-    setLoading(true);
-    setError("");
-    try {
-      const hasExistingAnalysis = Boolean(
-        analysisResponse?.analyses?.unheld || analysisResponse?.analyses?.held,
-      );
-      const response = await fetch(`${API_BASE_URL}/api/stocks/${stock.symbol}/ai-analysis`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force_refresh: hasExistingAnalysis }),
-      });
-      if (!response.ok) {
-        throw new Error(await parseError(response));
-      }
-      const payload = await response.json();
-      setAnalysisResponse((current) => mergeAiAnalysisResponse(current, payload));
-      if (!hasRunningAiAnalysis(payload)) {
-        onAnalysisPendingChange(false);
-      }
-    } catch (requestError) {
-      setError(requestError.message);
-      onAnalysisPendingChange(false);
-    } finally {
-      generationActiveRef.current = false;
-      setLoading(false);
-    }
+    await generate();
   }
 
   async function submitFeedback(rating, tags = []) {
-    if (!result?.id || feedbackSubmitting) {
-      return;
-    }
-    const key = rating === "useful" ? "useful" : tags[0] || "not_useful";
-    setFeedbackSubmitting(key);
-    setFeedbackStatus("");
-    try {
-      const response = await fetch(
-        `${API_BASE_URL}/api/stocks/${stock.symbol}/ai-analysis/${activeMode}/feedback`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            analysis_id: result.id,
-            rating,
-            tags,
-          }),
-        },
-      );
-      if (!response.ok) {
-        throw new Error(await parseError(response));
-      }
-      setFeedbackStatus("已記錄回饋");
-    } catch (requestError) {
-      setFeedbackStatus(requestError.message);
-    } finally {
-      setFeedbackSubmitting("");
-    }
+    await submitAnalysisFeedback(activeMode, result?.id, rating, tags);
   }
 
   if (!open) {
@@ -301,7 +164,6 @@ export function AIAnalysisPopover({
   const usingRuleSummary = Boolean(!result && ruleResult);
   const modeError = analysisResponse?.errors?.[modeKey];
   const hasAnyAnalysis = Boolean(analysisResponse?.analyses?.unheld || analysisResponse?.analyses?.held);
-  const running = analysisPending || hasRunningAiAnalysis(analysisResponse);
 
   return createPortal(
     <section
@@ -389,10 +251,10 @@ export function AIAnalysisPopover({
               <button
                 type="button"
                 className="text-button feedback-button"
-                disabled={!result?.id || feedbackSubmitting !== ""}
+                disabled={!result?.id || feedbackSubmitting}
                 onClick={() => submitFeedback("useful", [])}
               >
-                {feedbackSubmitting === "useful" ? <Loader2 className="spin" size={14} /> : <CheckCircle2 size={14} />}
+                {feedbackSubmitting ? <Loader2 className="spin" size={14} /> : <CheckCircle2 size={14} />}
                 有幫助
               </button>
               {AI_FEEDBACK_TAGS.map((item) => (
@@ -400,10 +262,9 @@ export function AIAnalysisPopover({
                   key={item.tag}
                   type="button"
                   className="text-button feedback-button"
-                  disabled={!result?.id || feedbackSubmitting !== ""}
+                  disabled={!result?.id || feedbackSubmitting}
                   onClick={() => submitFeedback("not_useful", [item.tag])}
                 >
-                  {feedbackSubmitting === item.tag && <Loader2 className="spin" size={14} />}
                   {item.label}
                 </button>
               ))}

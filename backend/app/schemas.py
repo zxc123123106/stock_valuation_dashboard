@@ -1,6 +1,7 @@
 """Backward-compatible Pydantic schema facade."""
 
 from .schema.ai import *
+from .schema.dashboard import *
 from .schema.fundamental import *
 from .schema.futures import *
 from .schema.quality import *

@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 
-import { API_BASE_URL } from "../../api/client";
+import { queryKeys } from "../../api/queryKeys";
+import { getFundamentalTrends } from "../../api/stocks";
 import { DataQualityBadge } from "../shared/DataQualityBadge";
 import {
   formatDate,
@@ -44,45 +46,26 @@ function storeFundamentalCategory(symbol, categoryKey) {
 
 export function FundamentalDisclosure({ symbol, fundamental, quality, expanded, onToggle }) {
   const [activeCategory, setActiveCategory] = useState(() => loadFundamentalCategory(symbol));
-  const [trends, setTrends] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const trendsQuery = useQuery({
+    queryKey: queryKeys.fundamentalTrends(symbol, fundamental?.fetched_at),
+    queryFn: ({ signal }) => getFundamentalTrends(symbol, signal),
+    enabled: Boolean(expanded && symbol),
+    staleTime: 5 * 60 * 1000,
+    placeholderData: (previous) => previous,
+  });
+  const trends = trendsQuery.data || null;
+  const loading = trendsQuery.isPending || trendsQuery.isFetching;
+  const error = trendsQuery.error ? "基本面趨勢資料讀取失敗" : "";
 
   useEffect(() => {
     setActiveCategory(loadFundamentalCategory(symbol));
   }, [symbol]);
 
   useEffect(() => {
-    if (!expanded || trends?.symbol === symbol) {
-      return undefined;
-    }
-    const controller = new AbortController();
-    setLoading(true);
-    setError("");
-    fetch(`${API_BASE_URL}/api/stocks/${symbol}/fundamentals/trends`, { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        return response.json();
-      })
-      .then((payload) => {
-        setTrends(payload);
-        const availableKeys = payload.categories?.map((category) => category.key) || [];
-        setActiveCategory((current) => (availableKeys.includes(current) ? current : "eps"));
-      })
-      .catch((fetchError) => {
-        if (fetchError.name !== "AbortError") {
-          setError("基本面趨勢資料讀取失敗");
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-        }
-      });
-    return () => controller.abort();
-  }, [expanded, symbol, trends?.symbol]);
+    if (!trends) return;
+    const availableKeys = trends.categories?.map((category) => category.key) || [];
+    setActiveCategory((current) => (availableKeys.includes(current) ? current : "eps"));
+  }, [trends]);
 
   const categories = trends?.categories || [];
   const activeTrend = categories.find((category) => category.key === activeCategory) || categories[0] || null;
@@ -118,7 +101,7 @@ export function FundamentalDisclosure({ symbol, fundamental, quality, expanded, 
               </button>
             ))}
           </div>
-          {loading ? (
+          {loading && !trends ? (
             <div className="fundamental-loading">
               <Loader2 size={16} />
               讀取基本面趨勢

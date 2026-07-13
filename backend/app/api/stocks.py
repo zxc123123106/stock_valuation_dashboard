@@ -16,7 +16,8 @@ from ..schema.stock import (
     TechnicalAnalysisResponse,
 )
 from ..services import stock_service
-from .dependencies import get_refresh_manager
+from ..services.dashboard_service import DashboardSnapshotCache
+from .dependencies import get_dashboard_snapshot_cache, get_refresh_manager
 
 
 router = APIRouter()
@@ -34,9 +35,15 @@ def list_stocks(session: Session = Depends(get_session)) -> list[StockResponse]:
 
 
 @router.post("/api/stocks/reorder", response_model=list[StockResponse])
-def reorder_stocks(payload: StockReorderRequest, session: Session = Depends(get_session)) -> list[StockResponse]:
+def reorder_stocks(
+    payload: StockReorderRequest,
+    session: Session = Depends(get_session),
+    snapshot_cache: DashboardSnapshotCache = Depends(get_dashboard_snapshot_cache),
+) -> list[StockResponse]:
     try:
-        return stock_service.reorder_stocks(session, payload.symbols)
+        response = stock_service.reorder_stocks(session, payload.symbols)
+        snapshot_cache.invalidate()
+        return response
     except (stock_service.StockValidationError, stock_service.StockNotFoundError) as exc:
         raise _http_error(exc) from exc
 
@@ -85,11 +92,13 @@ async def delete_stock(
     symbol: str,
     session: Session = Depends(get_session),
     manager: BackgroundRefreshManager = Depends(get_refresh_manager),
+    snapshot_cache: DashboardSnapshotCache = Depends(get_dashboard_snapshot_cache),
 ) -> StockDeleteResponse:
     try:
         normalized = stock_service.normalize_stock_symbol(symbol)
         await manager.forget_symbol(normalized)
         stock_service.delete_stock(session, normalized)
+        snapshot_cache.invalidate()
     except (stock_service.StockValidationError, stock_service.StockNotFoundError) as exc:
         raise _http_error(exc) from exc
     return StockDeleteResponse(status="ok", symbol=normalized)
@@ -100,17 +109,26 @@ def set_stock_position(
     symbol: str,
     payload: StockPositionRequest,
     session: Session = Depends(get_session),
+    snapshot_cache: DashboardSnapshotCache = Depends(get_dashboard_snapshot_cache),
 ) -> StockResponse:
     try:
-        return stock_service.set_position(session, symbol, payload.buy_price)
+        response = stock_service.set_position(session, symbol, payload.buy_price)
+        snapshot_cache.invalidate()
+        return response
     except (stock_service.StockValidationError, stock_service.StockNotFoundError) as exc:
         raise _http_error(exc) from exc
 
 
 @router.delete("/api/stocks/{symbol}/position", response_model=StockResponse)
-def clear_stock_position(symbol: str, session: Session = Depends(get_session)) -> StockResponse:
+def clear_stock_position(
+    symbol: str,
+    session: Session = Depends(get_session),
+    snapshot_cache: DashboardSnapshotCache = Depends(get_dashboard_snapshot_cache),
+) -> StockResponse:
     try:
-        return stock_service.clear_position(session, symbol)
+        response = stock_service.clear_position(session, symbol)
+        snapshot_cache.invalidate()
+        return response
     except (stock_service.StockValidationError, stock_service.StockNotFoundError) as exc:
         raise _http_error(exc) from exc
 

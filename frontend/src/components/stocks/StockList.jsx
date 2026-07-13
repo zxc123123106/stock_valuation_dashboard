@@ -10,8 +10,7 @@ import { SortableStockCard, StockCard } from "./StockCard";
 export function StockList({
   loading, stocks, refreshStatus, now, sensors, reordering, activeDragSymbol,
   setActiveDragSymbol, registerStockCard, moveStock, handleDragStart, handleDragEnd,
-  aiAnalysisPendingBySymbol, setAiAnalysisPending, queueRefreshSymbol, deleteStock,
-  savePosition, clearPosition,
+  queueRefreshSymbol, deleteStock, savePosition, clearPosition,
 }) {
   const refreshStateBySymbol = useMemo(
     () => new Map((refreshStatus?.symbols || []).map((state) => [state.symbol, state])),
@@ -43,8 +42,6 @@ export function StockList({
                   showRefreshState={isVisibleRefreshState(state, now)}
                   sortingDisabled={reordering || isPendingRefresh(state)}
                   actionDisabled={reordering}
-                  aiAnalysisPending={Boolean(aiAnalysisPendingBySymbol[stock.symbol])}
-                  onAiAnalysisPendingChange={(pending) => setAiAnalysisPending(stock.symbol, pending)}
                   onRegisterRef={registerStockCard}
                   onMoveUp={() => moveStock(stock.symbol, -1)}
                   onMoveDown={() => moveStock(stock.symbol, 1)}
@@ -65,8 +62,6 @@ export function StockList({
                 overlay
                 sortingDisabled
                 actionDisabled
-                aiAnalysisPending={Boolean(aiAnalysisPendingBySymbol[activeStock.symbol])}
-                onAiAnalysisPendingChange={() => {}}
                 canMoveUp={false}
                 canMoveDown={false}
                 onMoveUp={() => {}}

@@ -88,7 +88,10 @@ export function DataQualityPopover({ stock, open, anchorRef, onClose }) {
                   </div>
                   <div className="data-quality-facts">
                     <span><small>資料日期／期別</small><b>{qualityDataLabel(item)}</b></span>
-                    <span><small>取得時間</small><b>{item.fetched_at ? formatDate(item.fetched_at) : "尚無資料"}</b></span>
+                    <span>
+                      <small>{item.category === "AI_ANALYSIS" ? "成功分析時間" : "取得時間"}</small>
+                      <b>{item.fetched_at ? formatDate(item.fetched_at) : "尚無資料"}</b>
+                    </span>
                     <span><small>來源</small><b>{item.source || "尚無資料"}</b></span>
                   </div>
                   {item.components?.length > 1 && (
@@ -97,7 +100,11 @@ export function DataQualityPopover({ stock, open, anchorRef, onClose }) {
                         <span key={component.category}>
                           <b>{component.label}</b>
                           <DataQualityBadge quality={component} compact />
-                          <small>{qualityDataLabel(component)}</small>
+                          <small>
+                            {component.category.startsWith("AI_") && component.fetched_at
+                              ? formatDate(component.fetched_at)
+                              : qualityDataLabel(component)}
+                          </small>
                         </span>
                       ))}
                     </div>

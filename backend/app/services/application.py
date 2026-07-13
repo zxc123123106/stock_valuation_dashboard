@@ -1310,27 +1310,45 @@ def _ai_quality_components(stock: Stock, session: Session, now: datetime) -> lis
         ).all()
         success = next((row for row in rows if _ai_analysis_is_cacheable(row)), None)
         latest_attempt = rows[0] if rows else None
-        expected_hash = _ai_cache_input_hash(
-            _compact_ai_stock_summary(_ai_stock_summary(stock, session, mode), mode, analysis_now=now)
+        latest_attempt_after_success = bool(
+            latest_attempt
+            and success
+            and latest_attempt.id != success.id
+            and quality_as_taipei(latest_attempt.updated_at) >= quality_as_taipei(success.updated_at)
+        )
+        failed_after_success = bool(
+            latest_attempt_after_success
+            and latest_attempt.status in {"failed", "format_fallback"}
+        )
+        updating_after_success = bool(
+            latest_attempt_after_success
+            and latest_attempt.status in {"queued", "running"}
         )
         current = bool(
             success
             and success.prompt_version == PROMPT_VERSION
-            and success.input_hash == expected_hash
+            and success.analysis_date == quality_as_taipei(now).date()
+            and not failed_after_success
         )
-        failed_after_success = bool(
-            latest_attempt
-            and latest_attempt.status in {"failed", "format_fallback"}
-            and (success is None or latest_attempt.updated_at >= success.updated_at)
+        latest_failed = bool(latest_attempt and latest_attempt.status in {"failed", "format_fallback"})
+        sync_status = (
+            "failed" if latest_failed
+            else latest_attempt.status if latest_attempt
+            else "idle"
         )
+        error_summary = None
+        if latest_attempt and latest_attempt.status == "failed":
+            error_summary = "AI 分析服務暫時失敗"
+        elif latest_attempt and latest_attempt.status == "format_fallback":
+            error_summary = "AI 回覆未通過格式驗證"
         category = "AI_HELD" if mode == AI_MODE_HELD else "AI_UNHELD"
         components.append(
             DataQualityComponentResponse(
                 category=category,
                 label=QUALITY_LABELS[category],
                 freshness_status="MISSING" if success is None else "CURRENT" if current else "STALE",
-                is_cached=failed_after_success and success is not None,
-                sync_status=latest_attempt.status if latest_attempt else "idle",
+                is_cached=bool(success and (failed_after_success or updating_after_success)),
+                sync_status=sync_status,
                 data_date=success.analysis_date if success else None,
                 data_period=success.prompt_version if success else None,
                 fetched_at=(
@@ -1340,11 +1358,11 @@ def _ai_quality_components(stock: Stock, session: Session, now: datetime) -> lis
                 source=f"{success.provider} · {success.model}" if success else None,
                 last_attempt_at=_quality_api_datetime(latest_attempt.updated_at, now) if latest_attempt else None,
                 last_success_at=_quality_api_datetime(success.updated_at, now) if success else None,
-                last_error_summary="AI 分析服務暫時失敗" if latest_attempt and latest_attempt.status == "failed" else None,
-                last_error_detail=latest_attempt.error_message if latest_attempt and latest_attempt.status == "failed" else None,
+                last_error_summary=error_summary if latest_failed else None,
+                last_error_detail=latest_attempt.error_message if latest_failed else None,
                 last_error_at=(
                     _quality_api_datetime(latest_attempt.updated_at, now)
-                    if latest_attempt and latest_attempt.status == "failed" else None
+                    if latest_failed else None
                 ),
             )
         )

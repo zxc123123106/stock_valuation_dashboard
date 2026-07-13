@@ -66,8 +66,6 @@ export function SortableStockCard({
   onDelete,
   onSavePosition,
   onClearPosition,
-  aiAnalysisPending,
-  onAiAnalysisPendingChange,
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: stock.symbol,
@@ -94,8 +92,6 @@ export function SortableStockCard({
       dragging={isDragging}
       sortingDisabled={sortingDisabled}
       actionDisabled={actionDisabled}
-      aiAnalysisPending={aiAnalysisPending}
-      onAiAnalysisPendingChange={onAiAnalysisPendingChange}
       canMoveUp={index > 0}
       canMoveDown={index < total - 1}
       dragAttributes={attributes}
@@ -129,8 +125,6 @@ export const StockCard = React.forwardRef(function StockCard(
     onDelete,
     onSavePosition,
     onClearPosition,
-    aiAnalysisPending = false,
-    onAiAnalysisPendingChange = () => {},
     style,
   },
   ref,
@@ -396,8 +390,6 @@ export const StockCard = React.forwardRef(function StockCard(
         open={aiAnalysisOpen}
         anchorRef={aiButtonRef}
         onClose={() => setAiAnalysisOpen(false)}
-        analysisPending={aiAnalysisPending}
-        onAnalysisPendingChange={onAiAnalysisPendingChange}
       />
     </article>
   );

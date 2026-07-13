@@ -4,6 +4,8 @@ from sqlalchemy.orm import Session
 from ..db.session import get_session
 from ..schema.settings import BrokerSettingRequest, BrokerSettingResponse
 from ..services import settings_service
+from ..services.dashboard_service import DashboardSnapshotCache
+from .dependencies import get_dashboard_snapshot_cache
 
 
 router = APIRouter()
@@ -18,8 +20,11 @@ def get_broker_setting(session: Session = Depends(get_session)) -> BrokerSetting
 def update_broker_setting(
     payload: BrokerSettingRequest,
     session: Session = Depends(get_session),
+    snapshot_cache: DashboardSnapshotCache = Depends(get_dashboard_snapshot_cache),
 ) -> BrokerSettingResponse:
     try:
-        return settings_service.update_broker_setting(session, payload.broker_id)
+        response = settings_service.update_broker_setting(session, payload.broker_id)
+        snapshot_cache.invalidate()
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

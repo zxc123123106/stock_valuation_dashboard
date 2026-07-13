@@ -5,10 +5,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import ai, futures, refresh, settings as settings_router, stocks, system
+from .api import ai, dashboard, futures, refresh, settings as settings_router, stocks, system
 from .config import get_settings
 from .db.bootstrap import init_database
 from .services.refresh_service import create_refresh_manager
+from .services.dashboard_service import DashboardSnapshotCache
 
 
 settings = get_settings()
@@ -38,10 +39,13 @@ def create_app(manager=None) -> FastAPI:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["*"],
+        expose_headers=["ETag"],
     )
     application.state.refresh_manager = manager or refresh_manager
+    application.state.dashboard_snapshot_cache = DashboardSnapshotCache(ttl_seconds=1.0)
     for api_router in (
         system.router,
+        dashboard.router,
         settings_router.router,
         futures.router,
         stocks.router,

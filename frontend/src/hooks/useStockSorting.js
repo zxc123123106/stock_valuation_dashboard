@@ -1,13 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { arrayMove, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { reorderStocks } from "../api/stocks";
+import { queryKeys, updateDashboardStocks } from "../api/queryKeys";
 import { applyDisplayOrder } from "../utils/stocks";
 
 
-export function useStockSorting({ stocks, setStocks, setError, setMessage, reorderingRef }) {
-  const [reordering, setReordering] = useState(false);
+export function useStockSorting({ stocks, setError, setMessage }) {
+  const queryClient = useQueryClient();
+  const reorderMutation = useMutation({
+    mutationKey: ["stocks", "reorder"],
+    mutationFn: reorderStocks,
+  });
+  const reordering = reorderMutation.isPending;
   const [activeDragSymbol, setActiveDragSymbol] = useState("");
   const autoScrollFrameRef = useRef(0);
   const autoScrollSpeedRef = useRef(0);
@@ -30,22 +37,26 @@ export function useStockSorting({ stocks, setStocks, setError, setMessage, reord
   }), []);
 
   const persistOrder = useCallback(async (nextStocks, previousStocks, focusSymbol = "") => {
-    reorderingRef.current = true;
-    setStocks(nextStocks);
+    await queryClient.cancelQueries({ queryKey: queryKeys.dashboard });
+    const previousSnapshot = queryClient.getQueryData(queryKeys.dashboard);
+    updateDashboardStocks(queryClient, nextStocks);
     if (focusSymbol) scrollStockToCenter(focusSymbol);
-    setReordering(true); setError(""); setMessage("");
+    setError(""); setMessage("");
     try {
-      setStocks(await reorderStocks(nextStocks.map((stock) => stock.symbol)));
+      updateDashboardStocks(
+        queryClient,
+        await reorderMutation.mutateAsync(nextStocks.map((stock) => stock.symbol)),
+      );
       if (focusSymbol) scrollStockToCenter(focusSymbol);
       setMessage("排序已更新");
     } catch (error) {
-      setStocks(previousStocks);
+      if (previousSnapshot) queryClient.setQueryData(queryKeys.dashboard, previousSnapshot);
+      else updateDashboardStocks(queryClient, previousStocks);
       setError(error.message);
     } finally {
-      reorderingRef.current = false;
-      setReordering(false);
+      queryClient.invalidateQueries({ queryKey: queryKeys.dashboard });
     }
-  }, [reorderingRef, scrollStockToCenter, setError, setMessage, setStocks]);
+  }, [queryClient, reorderMutation, scrollStockToCenter, setError, setMessage]);
 
   const moveStock = useCallback((symbol, direction) => {
     if (reordering) return;

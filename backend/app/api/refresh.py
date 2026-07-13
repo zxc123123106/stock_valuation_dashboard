@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..refresh.manager import BackgroundRefreshManager
 from ..schema.refresh import RefreshQueueResponse, RefreshStatusResponse
-from .dependencies import get_refresh_manager
+from ..services.dashboard_service import DashboardSnapshotCache
+from .dependencies import get_dashboard_snapshot_cache, get_refresh_manager
 
 
 router = APIRouter()
@@ -22,8 +23,10 @@ async def refresh_status(
 @router.post("/api/stocks/refresh", response_model=RefreshQueueResponse, status_code=status.HTTP_202_ACCEPTED)
 async def refresh_all_stocks(
     manager: BackgroundRefreshManager = Depends(get_refresh_manager),
+    snapshot_cache: DashboardSnapshotCache = Depends(get_dashboard_snapshot_cache),
 ) -> RefreshQueueResponse:
     states = await manager.queue_active_stocks(force_full=True)
+    snapshot_cache.invalidate()
     queued_at = datetime.now(UTC)
     symbols = [state.symbol for state in states]
     if states:
@@ -40,11 +43,13 @@ async def refresh_all_stocks(
 async def refresh_stock(
     symbol: str,
     manager: BackgroundRefreshManager = Depends(get_refresh_manager),
+    snapshot_cache: DashboardSnapshotCache = Depends(get_dashboard_snapshot_cache),
 ) -> RefreshQueueResponse:
     try:
         state = await manager.queue_symbol(symbol, create_placeholder=True)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    snapshot_cache.invalidate()
     return RefreshQueueResponse(
         status=state.status,
         symbol=state.symbol,

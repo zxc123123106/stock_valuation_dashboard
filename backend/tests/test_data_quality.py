@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -15,8 +16,9 @@ from backend.app.data_quality import (
     record_quality_failure,
     record_quality_success,
 )
-from backend.app.database import Base, Stock, StockDailyPrice, StockDataQualityState
-from backend.app.services.application import _stock_data_quality_response
+from backend.app.ai_analysis import AI_MODE_UNHELD, PROMPT_VERSION
+from backend.app.database import Base, Stock, StockAIAnalysis, StockDailyPrice, StockDataQualityState
+from backend.app.services.application import _ai_quality_components, _stock_data_quality_response
 
 
 class DataQualityTest(unittest.TestCase):
@@ -142,6 +144,86 @@ class DataQualityTest(unittest.TestCase):
             items = {item.category: item for item in response.items}
             self.assertEqual(items["PE"].freshness_status, "NOT_APPLICABLE")
             self.assertEqual(items["FUNDAMENTAL"].freshness_status, "NOT_APPLICABLE")
+
+    def test_successful_ai_analysis_stays_current_for_its_taipei_date(self) -> None:
+        now = datetime(2026, 7, 13, 14, 10, tzinfo=UTC)
+        requested_at = "2026-07-13T22:00:00+08:00"
+        with self.Session() as session:
+            stock = self._stock(session)
+            success = StockAIAnalysis(
+                stock_id=stock.id,
+                provider="openrouter",
+                model="test-model",
+                analysis_mode=AI_MODE_UNHELD,
+                prompt_version=PROMPT_VERSION,
+                analysis_date=date(2026, 7, 13),
+                input_hash="old-input-hash",
+                request_payload_json=json.dumps(
+                    {"analysis_context": {"analysis_requested_at": requested_at}}
+                ),
+                response_json="{}",
+                validation_errors_json="[]",
+                status="success",
+                created_at=now - timedelta(minutes=10),
+                updated_at=now - timedelta(minutes=9),
+            )
+            session.add(success)
+            session.commit()
+
+            component = _ai_quality_components(stock, session, now)[0]
+
+            self.assertEqual(component.freshness_status, "CURRENT")
+            self.assertFalse(component.is_cached)
+            self.assertEqual(component.fetched_at, datetime(2026, 7, 13, 14, 0, tzinfo=UTC))
+
+    def test_failed_ai_refresh_keeps_last_success_time_and_marks_cache_stale(self) -> None:
+        now = datetime(2026, 7, 13, 14, 10, tzinfo=UTC)
+        requested_at = "2026-07-13T22:00:00+08:00"
+        with self.Session() as session:
+            stock = self._stock(session)
+            success = StockAIAnalysis(
+                stock_id=stock.id,
+                provider="openrouter",
+                model="test-model",
+                analysis_mode=AI_MODE_UNHELD,
+                prompt_version=PROMPT_VERSION,
+                analysis_date=date(2026, 7, 13),
+                input_hash="successful-input-hash",
+                request_payload_json=json.dumps(
+                    {"analysis_context": {"analysis_requested_at": requested_at}}
+                ),
+                response_json="{}",
+                validation_errors_json="[]",
+                status="success",
+                created_at=now - timedelta(minutes=10),
+                updated_at=now - timedelta(minutes=9),
+            )
+            failed = StockAIAnalysis(
+                stock_id=stock.id,
+                provider="openrouter",
+                model="test-model",
+                analysis_mode=AI_MODE_UNHELD,
+                prompt_version=PROMPT_VERSION,
+                analysis_date=date(2026, 7, 13),
+                input_hash="new-input-hash",
+                request_payload_json="{}",
+                response_json="{}",
+                validation_errors_json="[]",
+                status="failed",
+                error_message="OpenRouter status 502",
+                created_at=now - timedelta(minutes=2),
+                updated_at=now - timedelta(minutes=1),
+            )
+            session.add_all([success, failed])
+            session.commit()
+
+            component = _ai_quality_components(stock, session, now)[0]
+
+            self.assertEqual(component.freshness_status, "STALE")
+            self.assertTrue(component.is_cached)
+            self.assertEqual(component.sync_status, "failed")
+            self.assertEqual(component.fetched_at, datetime(2026, 7, 13, 14, 0, tzinfo=UTC))
+            self.assertEqual(component.last_error_at, now - timedelta(minutes=1))
 
 
 if __name__ == "__main__":
