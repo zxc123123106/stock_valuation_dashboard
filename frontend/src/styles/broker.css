@@ -1,0 +1,183 @@
+.technical-error {
+  color: var(--danger);
+}
+
+.broker-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--line-soft);
+}
+
+.broker-summary div {
+  min-height: 72px;
+  padding: 12px 14px;
+  background: rgba(24, 23, 21, 0.96);
+}
+
+.broker-summary span,
+.broker-ranking small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.broker-summary strong {
+  display: block;
+  margin-top: 7px;
+  font-size: 1.02rem;
+  line-height: 1.2;
+}
+
+.broker-rankings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.broker-ranking {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(17, 17, 16, 0.88);
+}
+
+.broker-ranking > strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-strong);
+  font-size: 0.86rem;
+}
+
+.broker-ranking-row {
+  display: grid;
+  grid-template-columns: 32px minmax(92px, 1fr) repeat(3, minmax(64px, 0.62fr));
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-soft);
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.broker-ranking-row span:nth-child(1) {
+  color: var(--gold);
+  font-weight: 750;
+}
+
+.broker-ranking-row span:nth-child(n + 3) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.broker-ranking-head {
+  padding: 7px 0;
+  border-top: 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.broker-ranking-head span:first-child {
+  color: var(--muted);
+}
+
+.broker-buy {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.broker-sell {
+  color: var(--success);
+  font-weight: 650;
+}
+
+.broker-trade-volume {
+  color: var(--gold-strong);
+  font-weight: 650;
+}
+
+.broker-source {
+  display: block;
+  margin-top: 10px;
+  text-align: right;
+}
+
+small {
+  margin-top: 3px;
+  color: var(--muted-soft);
+  font-size: 0.75rem;
+}
+
+.positive {
+  color: var(--gold-strong);
+  font-weight: 650;
+}
+
+.positive small {
+  color: #d7cab3;
+}
+
+.negative {
+  color: var(--success);
+  font-weight: 650;
+}
+
+.negative small {
+  color: #a7e7c7;
+}
+
+.percentage-positive,
+.profit-section > strong.percentage-positive {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.percentage-negative,
+.profit-section > strong.percentage-negative {
+  color: var(--success);
+  font-weight: 650;
+}
+
+.percentage-zero {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  color: var(--muted-soft);
+  font-size: 0.82rem;
+}
+
+footer a {
+  color: var(--gold);
+  text-decoration: none;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+

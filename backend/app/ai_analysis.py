@@ -14,7 +14,7 @@ from .schemas import StockAIAnalysisContent, StockAIAnalysisEvidenceText
 GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_DISCLAIMER = "本分析僅依據既有資料整理，不構成任何投資建議。"
-PROMPT_VERSION = "v3-feedback-grounded"
+PROMPT_VERSION = "v4-analysis-time"
 AI_MODE_GENERAL = "GENERAL"
 AI_MODE_UNHELD = "UNHELD"
 AI_MODE_HELD = "HELD"
@@ -24,39 +24,15 @@ ALLOWED_STATUSES = {
     AI_MODE_HELD: ("續抱", "觀察", "分批調節", "重新評估"),
 }
 
-_MISSING_DATA_WORDS = ("未提供", "缺少", "待補充", "需補充", "需要補充", "未納入", "無法完整評估")
 _PRIVATE_POSITION_WORDS = (
     "持股股數",
     "持有股數",
-    "持股比例",
-    "總成本",
-    "持倉市值",
-    "資產規模",
-    "總資產",
-    "帳戶資訊",
-    "券商帳戶",
-)
-_UNSUPPORTED_CONTEXT_WORDS = (
-    "外資",
-    "投信",
-    "三大法人",
-    "未平倉",
-    "支撐位",
-    "壓力位",
-    "阻力",
-    "新產品",
-    "客戶布局",
-    "客戶佈局",
-    "未來EPS預測",
-    "未來 EPS 預測",
-    "全球需求",
-    "外部需求",
-    "需求放緩",
-    "宏觀",
-    "市場情緒",
+    "庫存股數",
+    "部位股數",
 )
 _UNHELD_POSITION_WORDS = ("續抱", "持有中", "未實現損益", "加碼", "賣出", "停損", "調節")
 _MISREPRESENTATION_WORDS = ("公平估值", "合理估值", "目標價", "必然上漲", "必然下跌")
+_EVIDENCE_REPAIRED_WARNING = "warning: evidence keys repaired"
 
 
 class AIAnalysisError(RuntimeError):
@@ -152,7 +128,7 @@ class OpenRouterProvider:
                 {"role": "user", "content": prompts.user},
             ],
             "temperature": 0.2,
-            "max_tokens": 1800,
+            "max_tokens": 2400,
             "reasoning": {"exclude": True},
             "provider": {"require_parameters": True},
             "response_format": {
@@ -272,10 +248,10 @@ def quality_flags_from_validation_errors(errors: list[str]) -> list[str]:
             flags.add("wrong_status")
         if "private position" in lower:
             flags.add("private_position_leak")
-        if "unsupported context" in lower:
-            flags.add("unsupported_context")
         if "missing data presented" in lower:
             flags.add("missing_data_as_finding")
+        if "evidence keys repaired" in lower:
+            flags.add("evidence_repaired")
         if "not a json" in lower or "missing required field" in lower:
             flags.add("format_issue")
         if "mechanical estimate misrepresented" in lower:
@@ -289,7 +265,10 @@ def grounding_errors_from_validation_errors(errors: list[str]) -> list[str]:
     return [
         str(error)
         for error in errors
-        if "invalid evidence key" in str(error).lower() or "missing evidence key" in str(error).lower()
+        if (
+            "invalid evidence key" in str(error).lower()
+            or "missing evidence key" in str(error).lower()
+        )
     ]
 
 
@@ -302,7 +281,7 @@ def analysis_json_schema(analysis_mode: str) -> dict[str, Any]:
             "evidence_keys": {
                 "type": "array",
                 "items": {"type": "string", "maxLength": 120},
-                "maxItems": 5,
+                "maxItems": 4,
             },
         },
         "required": ["text", "evidence_keys"],
@@ -311,11 +290,11 @@ def analysis_json_schema(analysis_mode: str) -> dict[str, Any]:
     grounded_point_schema = {
         "type": "object",
         "properties": {
-            "text": {"type": "string", "minLength": 1, "maxLength": 80},
+            "text": {"type": "string", "minLength": 1, "maxLength": 96},
             "evidence_keys": {
                 "type": "array",
                 "items": {"type": "string", "maxLength": 120},
-                "maxItems": 5,
+                "maxItems": 3,
             },
         },
         "required": ["text", "evidence_keys"],
@@ -329,17 +308,17 @@ def analysis_json_schema(analysis_mode: str) -> dict[str, Any]:
             "positive_points": {
                 "type": "array",
                 "items": grounded_point_schema,
-                "maxItems": 5,
+                "maxItems": 3,
             },
             "risk_points": {
                 "type": "array",
                 "items": grounded_point_schema,
-                "maxItems": 5,
+                "maxItems": 3,
             },
             "watch_points": {
                 "type": "array",
                 "items": grounded_point_schema,
-                "maxItems": 5,
+                "maxItems": 3,
             },
             "disclaimer": {"type": "string", "maxLength": 120},
         },
@@ -453,7 +432,7 @@ def _analysis_prompts(stock_summary: dict[str, Any], analysis_mode: str) -> Anal
         objective = (
             "這是持有中評估。使用者已提供成交均價。"
             "評估持有理由是否仍成立，以及應續抱、觀察、分批調節或重新評估。"
-            "可以使用成交均價與每股或百分比損益，但不得要求持股股數或總金額。"
+            "可以使用成交均價、每股損益、百分比損益、費後損益與公開市場資料，但不得要求或推測持有股數。"
         )
     else:
         objective = "請整理現有資料並給出保守的觀察結論。"
@@ -462,24 +441,27 @@ def _analysis_prompts(stock_summary: dict[str, Any], analysis_mode: str) -> Anal
         "你是台股資料解讀器，只能解讀輸入 JSON 中明確存在的資料。"
         f"{objective}"
         f"overall_status 只能是：{allowed}。"
-        "私人持股股數、持股比例、總成本、持倉市值、資產規模、總資產與帳戶資訊是刻意省略的。"
-        "不得要求、推測或把這些私人資料的缺少列為風險或觀察點。"
-        "不得把任何未提供欄位列為缺失，也不得引用輸入中不存在的外資、投信、三大法人、"
-        "未平倉、支撐壓力、產品、客戶或未來預測資料。"
+        "持有股數是唯一禁用的個人部位資料，不得要求、推測或把未提供持有股數列為風險或觀察點。"
+        "成交均價、每股損益、百分比損益、費後損益、公開財務資料、公開籌碼資料與市場指標都可以使用。"
+        "若輸入沒有某項資料，可以在觀察點中保守提醒未來可補強該面向，但不得把未提供資料當成既定事實。"
+        "請綜合估值、基本面、技術面、成交量、籌碼、PE 歷史位置、行情相對開盤/昨收/高低點的變化，不要只依賴單一指標。"
         "EPS × 目前PE 是機械情境估算，不是預測價格、合理價保證或必然漲跌空間。"
         "volume_as_percent_of_ma20 是今日量占20日均量的比例；低於100代表量縮。"
         "volume_difference_vs_ma20_percent 才是今日量相對20日均量的增減百分比。"
         "不得自行重新計算後改寫輸入數字。不得承諾報酬或給出確定性買賣指令。"
+        "analysis_context.analysis_requested_at 是本次分析請求當下的 Asia/Taipei 日期時間，"
+        "不是行情、財報或籌碼的資料更新時間。判斷資料新鮮度時，必須將它與各資料欄位自己的日期時間分開解讀。"
         "stock_summary.evidence 是唯一可引用的證據清單。summary、positive_points、risk_points、watch_points "
         "每一項都必須是 {\"text\": \"...\", \"evidence_keys\": [\"...\"]}，且 evidence_keys 只能使用 evidence 中存在的 key。"
         "每個非空結論至少綁定一個 evidence key；若沒有足夠證據，請降低結論強度並使用資料不足。"
         "輸出鍵名必須完全使用 overall_status、summary、positive_points、risk_points、watch_points、disclaimer，"
         "不得改名為 positives、risks、next_steps 或其他名稱。"
+        "positive_points、risk_points、watch_points 各最多三點。"
         "只輸出符合 JSON schema 的一個 JSON object，不要 Markdown、code fence、推理過程或額外說明。"
     )
     user = (
         f"analysis_mode: {analysis_mode}\n"
-        "請以繁體中文輸出 80 到 140 字摘要，以及最多五點正面因素、風險因素與後續觀察。"
+        "請以繁體中文輸出 60 到 110 字摘要，以及最多三點正面因素、風險因素與後續觀察。"
         "每個 text 只寫結論，不要在文字中列出 evidence key。\n\n"
         f"stock_summary:\n{json.dumps(stock_summary, ensure_ascii=False, indent=2)}"
     )
@@ -613,17 +595,18 @@ def _repair_json_text(text: str) -> str:
 def _parse_loose_analysis(text: str) -> dict[str, Any] | None:
     normalized = _repair_json_text(text)
     keys = ("overall_status", "summary", "positive_points", "risk_points", "watch_points")
-    if not any(key in normalized for key in keys):
-        return None
-    parsed = {
-        "overall_status": _extract_loose_string(normalized, "overall_status"),
-        "summary": _extract_loose_string(normalized, "summary"),
-        "positive_points": _extract_loose_list(normalized, "positive_points"),
-        "risk_points": _extract_loose_list(normalized, "risk_points"),
-        "watch_points": _extract_loose_list(normalized, "watch_points"),
-        "disclaimer": _extract_loose_string(normalized, "disclaimer"),
-    }
-    return parsed if any(parsed.get(key) for key in keys) else None
+    if any(key in normalized for key in keys):
+        parsed = {
+            "overall_status": _extract_loose_string(normalized, "overall_status"),
+            "summary": _extract_loose_string(normalized, "summary"),
+            "positive_points": _extract_loose_list(normalized, "positive_points"),
+            "risk_points": _extract_loose_list(normalized, "risk_points"),
+            "watch_points": _extract_loose_list(normalized, "watch_points"),
+            "disclaimer": _extract_loose_string(normalized, "disclaimer"),
+        }
+        return parsed if any(parsed.get(key) for key in keys) else None
+    parsed = _parse_chinese_section_analysis(normalized)
+    return parsed if parsed and any(parsed.get(key) for key in keys) else None
 
 
 def _normalize_analysis_keys(payload: dict[str, Any]) -> dict[str, Any]:
@@ -666,6 +649,92 @@ def _extract_loose_list(text: str, key: str) -> list[str]:
     return _split_loose_items(_extract_loose_string(text, key))
 
 
+def _parse_chinese_section_analysis(text: str) -> dict[str, Any] | None:
+    status = _extract_chinese_status(text)
+    summary = _extract_chinese_section(text, ("摘要", "分析摘要", "總結", "整體摘要"))
+    positive = _extract_chinese_section_items(text, ("正面因素", "優勢", "利多", "正面"))
+    risks = _extract_chinese_section_items(text, ("風險因素", "風險", "利空"))
+    watch = _extract_chinese_section_items(text, ("後續觀察", "觀察重點", "觀察", "追蹤重點"))
+    if not any([status, summary, positive, risks, watch]):
+        return None
+    return {
+        "overall_status": status,
+        "summary": summary,
+        "positive_points": positive,
+        "risk_points": risks,
+        "watch_points": watch,
+        "disclaimer": _extract_chinese_section(text, ("免責聲明", "聲明")),
+    }
+
+
+def _extract_chinese_status(text: str) -> str | None:
+    match = re.search(r"(?:狀態|結論|overall_status)\s*[:：]\s*([^\n，,。；;]+)", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip().strip('"').strip("'")
+    for status_group in ALLOWED_STATUSES.values():
+        for status in status_group:
+            if re.search(rf"(?:^|[：:\s，,。；;]){re.escape(status)}(?:$|[：:\s，,。；;])", text):
+                return status
+    return None
+
+
+def _extract_chinese_section(text: str, labels: tuple[str, ...]) -> str | None:
+    block = _extract_chinese_section_block(text, labels)
+    if not block:
+        return None
+    lines = [line.strip().lstrip("-•0123456789.、) ") for line in block.splitlines()]
+    cleaned = " ".join(line for line in lines if line).strip()
+    return cleaned or None
+
+
+def _extract_chinese_section_items(text: str, labels: tuple[str, ...]) -> list[str]:
+    block = _extract_chinese_section_block(text, labels)
+    if not block:
+        return []
+    items: list[str] = []
+    for line in block.replace("\\n", "\n").splitlines():
+        cleaned = line.strip().lstrip("-•0123456789.、) ").strip()
+        if cleaned:
+            items.append(cleaned)
+    if len(items) <= 1:
+        items = _split_loose_items(block)
+    return _clean_list(items, 5, 80)
+
+
+def _extract_chinese_section_block(text: str, labels: tuple[str, ...]) -> str | None:
+    label_pattern = "|".join(re.escape(label) for label in labels)
+    stop_labels = (
+        "狀態",
+        "結論",
+        "摘要",
+        "分析摘要",
+        "總結",
+        "整體摘要",
+        "正面因素",
+        "優勢",
+        "利多",
+        "正面",
+        "風險因素",
+        "風險",
+        "利空",
+        "後續觀察",
+        "觀察重點",
+        "觀察",
+        "追蹤重點",
+        "免責聲明",
+        "聲明",
+    )
+    stop_pattern = "|".join(re.escape(label) for label in stop_labels)
+    match = re.search(
+        rf"(?:^|\n)\s*(?:{label_pattern})\s*[:：]?\s*(.*?)(?=\n\s*(?:{stop_pattern})\s*[:：]?|\Z)",
+        text,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
 def _split_loose_items(value: str | None) -> list[str]:
     if not value:
         return []
@@ -694,7 +763,14 @@ def _sanitize_grounded_text(
             continue
         kept.append(sentence)
     cleaned_text = "".join(kept).strip() or "AI 暫時沒有產生摘要。"
-    valid_keys = _validate_evidence_keys(field, keys, evidence_keys, errors, require_evidence and cleaned_text)
+    valid_keys = _validate_evidence_keys(
+        field,
+        keys,
+        evidence_keys,
+        errors,
+        require_evidence and cleaned_text,
+        cleaned_text,
+    )
     return StockAIAnalysisEvidenceText(text=cleaned_text, evidence_keys=valid_keys)
 
 
@@ -749,6 +825,7 @@ def _validate_evidence_keys(
     allowed_keys: set[str] | None,
     errors: list[str],
     require_evidence: bool | str,
+    text: str = "",
 ) -> list[str]:
     if allowed_keys is None:
         return keys
@@ -762,8 +839,59 @@ def _validate_evidence_keys(
     if invalid:
         errors.append(f"{field}: invalid evidence key(s): {', '.join(invalid[:5])}")
     if require_evidence and not valid:
+        repaired = _infer_evidence_keys(text, allowed_keys, field)
+        if repaired:
+            errors.append(f"{field}: {_EVIDENCE_REPAIRED_WARNING}")
+            return repaired
         errors.append(f"{field}: missing evidence key")
     return valid
+
+
+def _infer_evidence_keys(text: str, allowed_keys: set[str], field: str) -> list[str]:
+    if not allowed_keys:
+        return []
+    normalized = text.lower()
+    candidates: list[str] = []
+
+    def add_prefixes(*prefixes: str) -> None:
+        for prefix in prefixes:
+            for key in sorted(allowed_keys):
+                if key.startswith(prefix) and key not in candidates:
+                    candidates.append(key)
+                    break
+
+    if any(token in normalized for token in ("現價", "股價", "開盤", "昨收", "最高", "最低", "行情", "價格")):
+        add_prefixes("quote.")
+    if any(token.lower() in normalized for token in ("pe", "本益比", "估值", "估算", "預期股價", "預期損益", "成本估算")):
+        add_prefixes("valuation.", "valuation_scenarios.")
+    if any(token.lower() in normalized for token in ("eps", "營收", "毛利", "營益", "淨利", "基本面", "yoy", "mom", "sos")):
+        add_prefixes("fundamental.", "valuation_scenarios.")
+    if any(token.lower() in normalized for token in ("ma", "均線", "技術", "成交量", "量縮", "量增", "量能")):
+        add_prefixes("technical.")
+    if any(token in normalized for token in ("主力", "券商", "籌碼", "買超", "賣超", "買賣超")):
+        add_prefixes("chip.")
+    if any(token in normalized for token in ("成交均價", "成本", "損益", "費後", "持有")):
+        add_prefixes("position.")
+
+    if not candidates:
+        preferred = (
+            "quote.current_price_twd",
+            "valuation.current_pe",
+            "valuation.current_pe_vs_average_percent",
+            "fundamental.ttm_eps_yoy_percent",
+            "technical.latest.price_vs_ma20_percent",
+            "technical.latest.volume_difference_vs_ma20_percent",
+            "chip.main_net_volume_lots",
+            "position.unrealized_return_percent",
+        )
+        for key in preferred:
+            if key in allowed_keys and key not in candidates:
+                candidates.append(key)
+            if len(candidates) >= 3:
+                break
+
+    limit = 3 if field == "summary" else 2
+    return candidates[:limit]
 
 
 def _validation_violation(text: str, analysis_mode: str) -> str | None:
@@ -771,10 +899,6 @@ def _validation_violation(text: str, analysis_mode: str) -> str | None:
         return "malformed content"
     if any(word in text for word in _PRIVATE_POSITION_WORDS):
         return "private position data requested or inferred"
-    if any(word in text for word in _MISSING_DATA_WORDS):
-        return "warning: missing data presented as a finding"
-    if any(word in text for word in _UNSUPPORTED_CONTEXT_WORDS):
-        return "warning: unsupported context referenced"
     if any(word in text for word in _MISREPRESENTATION_WORDS):
         return "warning: mechanical estimate misrepresented"
     if analysis_mode == AI_MODE_UNHELD and any(word in text for word in _UNHELD_POSITION_WORDS):

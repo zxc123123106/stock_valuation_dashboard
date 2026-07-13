@@ -1,0 +1,221 @@
+.stock-disclosures {
+  padding: 0 16px 16px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.fundamental-disclosure,
+.broker-trading {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.fundamental-toggle,
+.broker-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  min-height: 50px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.fundamental-toggle span,
+.broker-toggle span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--gold-strong);
+  font-weight: 750;
+}
+
+.fundamental-toggle small,
+.broker-toggle small {
+  margin: 0;
+}
+
+.fundamental-panel,
+.broker-panel {
+  padding: 2px 0 16px;
+}
+
+.fundamental-tabs {
+  display: inline-flex;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px;
+  margin: 0 0 14px;
+  overflow-x: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.fundamental-tabs button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.fundamental-tabs button.active {
+  background: rgba(226, 200, 121, 0.16);
+  color: var(--gold-strong);
+}
+
+.fundamental-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 180px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.fundamental-loading svg {
+  animation: spin 0.9s linear infinite;
+}
+
+.fundamental-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--line-soft);
+}
+
+.fundamental-summary-card {
+  min-height: 82px;
+  padding: 14px;
+  background: rgba(13, 13, 12, 0.92);
+}
+
+.fundamental-summary-card span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.fundamental-summary-card strong {
+  display: block;
+  margin-top: 9px;
+  font-size: 1.12rem;
+  font-weight: 800;
+}
+
+.fundamental-summary-card .constant-value {
+  color: var(--gold-strong);
+}
+
+.fundamental-chart-card {
+  position: relative;
+  margin-top: 14px;
+  padding: 10px 8px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(8, 8, 7, 0.66);
+}
+
+.fundamental-trend-chart {
+  display: block;
+  width: 100%;
+  height: 280px;
+  touch-action: none;
+}
+
+.fundamental-grid-line {
+  stroke: rgba(226, 200, 121, 0.14);
+  stroke-width: 1;
+}
+
+.fundamental-grid-line.soft {
+  stroke: rgba(226, 200, 121, 0.08);
+}
+
+.fundamental-axis-label {
+  fill: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.fundamental-line {
+  stroke: var(--danger);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.fundamental-point {
+  fill: var(--surface);
+  stroke: var(--danger);
+  stroke-width: 3;
+}
+
+.fundamental-point.active {
+  stroke: var(--gold-strong);
+  filter: drop-shadow(0 0 7px rgba(226, 200, 121, 0.34));
+}
+
+.fundamental-crosshair {
+  stroke: rgba(230, 222, 204, 0.35);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.fundamental-tooltip {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  gap: 4px;
+  min-width: 176px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(16, 16, 14, 0.94);
+  color: var(--muted);
+  font-size: 0.78rem;
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+.fundamental-tooltip strong {
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.fundamental-tooltip b {
+  color: var(--gold-strong);
+  font-weight: 800;
+}
+
+.fundamental-chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 220px;
+  margin-top: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.fundamental-source {
+  display: block;
+  margin-top: 10px;
+  text-align: right;
+}
+

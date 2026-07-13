@@ -44,7 +44,17 @@ class Settings:
     gemini_model: str
     openrouter_api_key: str | None
     openrouter_model: str
+    openrouter_fallback_models: list[str]
+    openrouter_model_cooldown_seconds: int
+    ai_rate_limit_cooldown_seconds: int
+    ai_outage_cooldown_seconds: int
+    ai_format_failure_cooldown_seconds: int
     background_refresh_seconds: int
+    quote_market_interval_seconds: int
+    quote_off_hours_interval_seconds: int
+    pe_poll_interval_seconds: int
+    monthly_revenue_release_interval_seconds: int
+    futures_refresh_seconds: int
     crawler_log_retention_days: int
     crawler_log_cleanup_interval_hours: int
     api_version: str = "0.1.0"
@@ -79,9 +89,46 @@ def get_settings() -> Settings:
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY") or None,
         openrouter_model=os.getenv("OPENROUTER_MODEL", ""),
+        openrouter_fallback_models=_parse_origins(os.getenv("OPENROUTER_FALLBACK_MODELS", "")),
+        openrouter_model_cooldown_seconds=_parse_positive_int(
+            os.getenv("OPENROUTER_MODEL_COOLDOWN_SECONDS", "600"),
+            600,
+        ),
+        ai_rate_limit_cooldown_seconds=_parse_positive_int(
+            os.getenv("AI_RATE_LIMIT_COOLDOWN_SECONDS", os.getenv("OPENROUTER_MODEL_COOLDOWN_SECONDS", "900")),
+            900,
+        ),
+        ai_outage_cooldown_seconds=_parse_positive_int(
+            os.getenv("AI_OUTAGE_COOLDOWN_SECONDS", "180"),
+            180,
+        ),
+        ai_format_failure_cooldown_seconds=_parse_positive_int(
+            os.getenv("AI_FORMAT_FAILURE_COOLDOWN_SECONDS", "1800"),
+            1800,
+        ),
         background_refresh_seconds=_parse_positive_int(
             os.getenv("BACKGROUND_REFRESH_SECONDS", "60"),
             60,
+        ),
+        quote_market_interval_seconds=_parse_positive_int(
+            os.getenv("QUOTE_MARKET_INTERVAL_SECONDS", os.getenv("BACKGROUND_REFRESH_SECONDS", "60")),
+            60,
+        ),
+        quote_off_hours_interval_seconds=_parse_positive_int(
+            os.getenv("QUOTE_OFF_HOURS_INTERVAL_SECONDS", "900"),
+            900,
+        ),
+        pe_poll_interval_seconds=_parse_positive_int(
+            os.getenv("PE_POLL_INTERVAL_SECONDS", "900"),
+            900,
+        ),
+        monthly_revenue_release_interval_seconds=_parse_positive_int(
+            os.getenv("MONTHLY_REVENUE_RELEASE_INTERVAL_SECONDS", "7200"),
+            7200,
+        ),
+        futures_refresh_seconds=_parse_positive_int(
+            os.getenv("FUTURES_REFRESH_SECONDS", "10"),
+            10,
         ),
         crawler_log_retention_days=_parse_positive_int(
             os.getenv("CRAWLER_LOG_RETENTION_DAYS", "30"),

@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from backend.app.database import StockFinancialQuarter, StockMonthlyRevenue
-from backend.app.main import _fundamental_trend_categories
+from backend.app.services.application import _fundamental_trend_categories
 
 
 FETCHED_AT = datetime(2026, 6, 24, 8, 0, tzinfo=UTC)

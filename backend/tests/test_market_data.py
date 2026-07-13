@@ -4,7 +4,7 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
-from backend.app.market_data import (
+from backend.app.providers.market_data_legacy import (
     StockProfileSnapshot,
     _fetch_twse_mis_quote,
     _parse_financial_quarters,
@@ -12,6 +12,7 @@ from backend.app.market_data import (
     _parse_monthly_revenues,
     _parse_pe_history,
     derive_pe,
+    fetch_financial_bundle,
     fetch_stock_quote,
     fetch_stock_pe,
     fetch_stock_pe_snapshot,
@@ -48,7 +49,7 @@ class FinMindEpsParserTest(unittest.TestCase):
 
 class StockProfileTest(unittest.TestCase):
     def test_fetch_profile_uses_finmind_stock_info(self) -> None:
-        import backend.app.market_data as market_data
+        import backend.app.providers.market_data_legacy as market_data
 
         original = market_data._fetch_finmind_stock_info
         market_data._fetch_finmind_stock_info = lambda token: [
@@ -70,7 +71,7 @@ class StockProfileTest(unittest.TestCase):
         self.assertEqual(profile.market, "TWSE")
 
     def test_fetch_profile_discovers_tpex_market_when_finmind_is_unavailable(self) -> None:
-        import backend.app.market_data as market_data
+        import backend.app.providers.market_data_legacy as market_data
 
         class FakeResponse:
             def __init__(self, payload):
@@ -114,7 +115,7 @@ class StockProfileTest(unittest.TestCase):
 
 class TwseMisQuoteParserTest(unittest.TestCase):
     def test_fetch_twse_mis_quote_parses_realtime_fields(self) -> None:
-        import backend.app.market_data as market_data
+        import backend.app.providers.market_data_legacy as market_data
 
         class FakeResponse:
             def raise_for_status(self) -> None:
@@ -157,7 +158,7 @@ class TwseMisQuoteParserTest(unittest.TestCase):
         self.assertEqual(quote.source, "TWSE MIS realtime quote")
 
     def test_missing_last_trade_uses_best_bid_instead_of_open(self) -> None:
-        import backend.app.market_data as market_data
+        import backend.app.providers.market_data_legacy as market_data
 
         class FakeResponse:
             def raise_for_status(self) -> None:
@@ -198,7 +199,7 @@ class TwseMisQuoteParserTest(unittest.TestCase):
         self.assertEqual(quote.source, "TWSE MIS best bid fallback")
 
     def test_missing_trade_and_order_book_does_not_use_open_as_current_price(self) -> None:
-        import backend.app.market_data as market_data
+        import backend.app.providers.market_data_legacy as market_data
 
         class FakeResponse:
             def raise_for_status(self) -> None:
@@ -231,9 +232,9 @@ class TwseMisQuoteParserTest(unittest.TestCase):
         finally:
             market_data._build_session = original
 
-    @patch("backend.app.market_data._fetch_finmind_latest_daily_quote")
-    @patch("backend.app.market_data._fetch_twse_mis_quote", side_effect=ValueError("MIS unavailable"))
-    @patch("backend.app.market_data._taiwan_market_is_open", return_value=True)
+    @patch("backend.app.providers.market_data_legacy._fetch_finmind_latest_daily_quote")
+    @patch("backend.app.providers.market_data_legacy._fetch_twse_mis_quote", side_effect=ValueError("MIS unavailable"))
+    @patch("backend.app.providers.market_data_legacy._taiwan_market_is_open", return_value=True)
     def test_market_hours_do_not_fallback_to_daily_close(
         self,
         _market_open,
@@ -249,6 +250,23 @@ class TwseMisQuoteParserTest(unittest.TestCase):
 
 
 class FinMindFundamentalParserTest(unittest.TestCase):
+    @patch("backend.app.providers.market_data_legacy._fetch_finmind_data")
+    def test_financial_bundle_fetches_finmind_once_for_eps_and_quarters(self, fetch_data) -> None:
+        fetch_data.return_value = [
+            {"date": "2025-03-31", "type": "EPS", "value": 0.9},
+            {"date": "2025-06-30", "type": "EPS", "value": 1.0},
+            {"date": "2025-09-30", "type": "EPS", "value": 1.1},
+            {"date": "2025-12-31", "type": "EPS", "value": 1.2},
+            {"date": "2026-03-31", "type": "EPS", "value": 1.3},
+            {"date": "2026-03-31", "type": "Revenue", "value": 1000},
+        ]
+
+        bundle = fetch_financial_bundle("2330")
+
+        self.assertEqual(fetch_data.call_count, 1)
+        self.assertEqual(bundle.eps_rows[0].eps_value, Decimal("4.60"))
+        self.assertEqual(bundle.quarters[-1].eps, Decimal("1.30"))
+
     def test_derive_pe_returns_none_for_negative_ttm_eps(self) -> None:
         current_pe = derive_pe(
             Decimal("88.00"),
@@ -260,7 +278,7 @@ class FinMindFundamentalParserTest(unittest.TestCase):
         self.assertIsNone(current_pe)
 
     def test_fetch_stock_pe_falls_back_to_finmind_per(self) -> None:
-        import backend.app.market_data as market_data
+        import backend.app.providers.market_data_legacy as market_data
 
         original_get_json = market_data._get_json
         original_fetch_finmind_data = market_data._fetch_finmind_data
@@ -278,7 +296,7 @@ class FinMindFundamentalParserTest(unittest.TestCase):
         self.assertEqual(current_pe, Decimal("21.50"))
 
     def test_fetch_stock_pe_uses_newer_finmind_trade_date(self) -> None:
-        import backend.app.market_data as market_data
+        import backend.app.providers.market_data_legacy as market_data
 
         original_get_json = market_data._get_json
         original_fetch_finmind_data = market_data._fetch_finmind_data
@@ -300,7 +318,7 @@ class FinMindFundamentalParserTest(unittest.TestCase):
         self.assertEqual(snapshot.source, "FinMind TaiwanStockPER")
 
     def test_fetch_stock_pe_keeps_twse_when_finmind_is_unavailable(self) -> None:
-        import backend.app.market_data as market_data
+        import backend.app.providers.market_data_legacy as market_data
 
         original_get_json = market_data._get_json
         original_fetch_finmind_data = market_data._fetch_finmind_data
@@ -319,7 +337,7 @@ class FinMindFundamentalParserTest(unittest.TestCase):
         self.assertEqual(snapshot.source, "TWSE OpenAPI BWIBBU_ALL")
 
     def test_fetch_stock_pe_treats_zero_twse_pe_as_not_applicable(self) -> None:
-        import backend.app.market_data as market_data
+        import backend.app.providers.market_data_legacy as market_data
 
         original_get_json = market_data._get_json
         original_fetch_finmind_data = market_data._fetch_finmind_data

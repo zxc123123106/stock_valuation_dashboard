@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
 from backend.app.database import Base, Stock, StockEPS, StockMetric, StockPEHistory, StockValuation, apply_layered_stock_refresh, backfill_latest_metric_pe_from_history, ensure_analysis_cache_columns, remove_legacy_histock_eps
-import backend.app.database as database
+import backend.app.db.bootstrap as database
 
 
 class EpsSourceMigrationTest(unittest.TestCase):

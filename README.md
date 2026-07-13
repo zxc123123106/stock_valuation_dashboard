@@ -7,6 +7,36 @@
 - 後端 API：FastAPI + SQLite，預設執行於 `http://127.0.0.1:8000`
 - 前端看板：React/Vite，預設執行於 `http://127.0.0.1:5173`，也可能使用 Vite 自動分配的其他 port，例如 `5174`
 
+## 專案架構
+
+專案採模組化單體架構：FastAPI、React 與 SQLite 仍在同一個 repository 中執行，但 HTTP、use case、資料存取、外部資料源與背景排程已分開管理。
+
+後端主要目錄：
+
+```text
+backend/app/
+  api/           FastAPI routers 與 HTTP 錯誤轉換
+  services/      股票、基本面、技術面、AI、可信度等 use cases
+  repositories/ SQLite 查詢與 transaction 操作
+  providers/     TWSE、FinMind、Yahoo、TAIFEX、AI provider adapters
+  db/            session、models、bootstrap 與快取寫入
+  refresh/       manager、scheduler、job models 與四個更新通道
+  schema/        依領域拆分的 Pydantic schemas
+```
+
+前端主要目錄：
+
+```text
+frontend/src/
+  api/           API client 與領域端點
+  hooks/         polling、排序、股票操作、AI 與可信度狀態
+  components/    Dashboard、股票、基本面、技術、AI、WTX 等元件
+  utils/         格式化與純函式
+  styles/        tokens、base、layout 與各功能樣式
+```
+
+`backend/app/main.py` 只保留 app factory 入口，因此既有啟動方式 `uvicorn backend.app.main:app` 不變。`database.py`、`schemas.py`、`market_data.py` 與 `refresh_worker.py` 暫時保留為相容 facade，既有腳本可繼續匯入；新程式應使用對應的模組化套件。
+
 ## 系統需求
 
 - Python 3.13 或相容的 Python 3.x
@@ -171,25 +201,39 @@ curl http://127.0.0.1:8000/api/stocks
 
 前端每 5 秒讀取 SQLite 快取，不會等待外部 API，因此頁面不會因資料同步而整頁卡住。
 
-後端自動更新 24 小時不間斷執行，不再限制台股開盤時段。
+後端採 24 小時分流排程，不會每 60 秒對所有標的執行完整刷新。行情、基本面、主力與歷史資料使用獨立 queue，Yahoo 或 FinMind 的慢請求不會阻塞行情更新。
 
-- 股票與 ETF 股價每 `BACKGROUND_REFRESH_SECONDS` 更新一次，預設為 `60` 秒；資料來源依序為 FinMind sponsor 即時快照、TWSE MIS、FinMind `TaiwanStockPrice` 最近收盤。TWSE MIS 最新成交價缺漏時使用最佳買價、再使用最佳賣價，並跳過漲跌停委託簿中的 `0` 哨兵值；絕不以開盤價代替現價。盤中即時來源全部失敗時保留既有快取，不用日線收盤覆蓋。
+- 股票與 ETF 行情在平日 `09:00-13:30` 每 `QUOTE_MARKET_INTERVAL_SECONDS` 更新一次，預設 `60` 秒；盤外與週末每 `QUOTE_OFF_HOURS_INTERVAL_SECONDS` 確認一次，預設 `900` 秒。
+- 行情資料來源依序為 FinMind sponsor 即時快照、TWSE MIS、FinMind `TaiwanStockPrice` 最近收盤。TWSE MIS 最新成交價缺漏時使用最佳買價、再使用最佳賣價，並跳過漲跌停委託簿中的 `0` 哨兵值；絕不以開盤價代替現價。盤外日線 fallback 不比既有行情新時只確認來源可用，不覆蓋現價快取。
 - 新增標的時優先使用 FinMind `TaiwanStockInfo` 辨識名稱與市場；若 FinMind 無法使用，後端會改查 TWSE MIS 的上市與上櫃頻道，自動辨識 `TWSE / TPEX`，避免上櫃標的被錯誤送往上市行情端點。
-- 主力進出每日更新一次，股票與 ETF 都會抓取。
-- 日線使用 FinMind `TaiwanStockPrice` 每日更新一次，股票與 ETF 都會保存最近約 600 個日曆日的歷史資料；盤中另以現價快取補上當日暫定 K 棒。
+- 主力進出在平日 `18:10` 後更新，股票與 ETF 都會抓取；失敗時只重試主力通道。
+- 日線與三年 PE 歷史在平日 `18:05` 後更新。日線使用 FinMind `TaiwanStockPrice`，股票與 ETF 都會保存最近約 600 個日曆日的歷史資料；盤中另以現價快取補上當日暫定 K 棒。
 - 目前PE會比較 TWSE OpenAPI 與 FinMind `TaiwanStockPER` 的實際交易日期，採用日期較新的資料；同一交易日才優先使用 TWSE。
+
 - 近三年平均PE與PE區間使用 FinMind `TaiwanStockPER`。
-- EPS 與季度基本面使用 FinMind `TaiwanStockFinancialStatements`，月營收使用 FinMind `TaiwanStockMonthRevenue`，每日第一次自動更新會刷新一次，只適用股票。
+- EPS 與季度基本面在平日 `18:20` 後共用一次 FinMind `TaiwanStockFinancialStatements` 請求；月營收同時使用 FinMind `TaiwanStockMonthRevenue` 更新，只適用股票。
+- 每月 `8-12 日` 的 `09:00-23:00`，月營收每 `MONTHLY_REVENUE_RELEASE_INTERVAL_SECONDS` 檢查一次，預設每 2 小時；抓到前一月份後停止加密查詢。
 - ETF 顯示股價、買入價、每股未實現損益與主力進出；不顯示目前PE、EPS、基本面或估值列。
-- 每個平日 `18:00` 後，後端會做一次強制全量盤後補抓，讓 TWSE／FinMind 有時間發布當日收盤資料；看板「最近資料」顯示兩者快取中的最新官方交易日。
-- 週末也會維持背景更新；若資料源沒有新資料，系統會保留既有快取。
+- 每個平日 `18:00` 後，目前 PE 每 `PE_POLL_INTERVAL_SECONDS` 輪詢一次，預設 15 分鐘，直到資料日期追上當日官方交易日；18:00 前只要求前一交易日資料。
+- 週末只維持盤外行情確認；其他類別只在缺資料、過期或前次失敗尚未補齊時重試。
+- 台指期 WTX 在日盤 `08:45-13:45`、夜盤 `15:00-05:00` 每 `FUTURES_REFRESH_SECONDS` 更新一次，預設 10 秒；休盤停止外部請求並顯示最近快取。
 - 手動更新任何時間都可以使用。
-- 看板右上角的更新按鈕會排入全部標的的全量更新，會重新抓股價、PE、EPS 與主力進出；個股卡片右上角的更新按鈕則維持該檔標的的一般背景更新。
+- 看板右上角的更新按鈕會把全部標的的所有適用通道排入高優先 queue；個股卡片更新會立即更新行情，其餘只排入該檔目前到期或缺失的類別。
 - 更新失敗時會保留既有快取，並使用 1、3、5、15 分鐘的 backoff 節奏等待自動重試；手動更新會跳過等待時間。
 - 後端啟動時會檢查 `crawler_logs` 清理狀態，預設每 24 小時清一次，保留最近 30 天紀錄。
 - 目前不判斷台灣國定假日，因此平日假日仍可能嘗試更新。
 
 如果外部資料來源暫時失敗，後端會盡量保留既有快取，並把失敗原因寫入 `crawler_logs`。
+
+## 資料可信度
+
+每張標的卡片右上角的資料庫圖示會顯示目前資料品質；點擊後可分別查看行情、PE、基本面、籌碼、技術日線與 AI 分析。
+
+- `即時 / 最新 / 延遲 / 過期 / 待更新 / 不適用` 表示資料本身的新鮮度。
+- `使用快取` 是獨立狀態，代表最近一次同步失敗但仍有上次成功資料可用。
+- 面板會分開顯示資料日期、後端取得時間、來源、最近錯誤與下次重試時間。
+- ETF 的 PE 與基本面會顯示不適用，不列入整體品質判斷。
+- 同一標的中單一資料來源失敗不會阻塞其他資料，錯誤會寫入 `data_refresh:{symbol}:{category}` crawler log。
 
 ## 看板操作
 
@@ -203,7 +247,7 @@ curl http://127.0.0.1:8000/api/stocks
 - 每張卡片右上角的 AI 圖示會開啟浮動分析面板。開啟面板只讀 SQLite 最新快取，不會呼叫外部 AI；按 `產生分析` 或 `更新分析` 才會消耗 API 額度。
 - `未持有` 分析固定產生進場評估，結論限制為 `分批布局 / 等待 / 避開 / 資料不足`。存在成交均價時會再產生獨立的 `持有中` 分析，結論限制為 `續抱 / 觀察 / 分批調節 / 重新評估`。
 - 未持有模式不傳成交均價或個人損益；持有中模式只傳成交均價與每股／百分比損益。兩種模式都不傳持股股數、總成本、持倉市值、資產規模或帳戶資訊。
-- AI 分析使用 `v2-dual-mode` prompt。OpenRouter 會先要求 strict structured output；若免費 provider 因參數支援標記而無法路由，會自動降級為 `json_object`，但仍須通過後端完整格式與隱私驗證。驗證失敗的結果只保存為檢查 Log，不會成為成功快取。
+- AI 分析使用 evidence-based prompt，回覆中的結論需引用後端提供的 evidence key。OpenRouter 會先要求 strict structured output；若免費 provider 因參數支援標記而無法路由，會自動降級為 `json_object`，但仍須通過後端完整格式與隱私驗證。驗證失敗的結果只保存為檢查 Log，不會成為成功快取。
 - 按 `賣出` 會清除該檔標的目前買入價。
 - 可以拖曳卡片左側排序把手調整順序，也可以用卡片右上角的上移/下移箭頭微調。
 - 刪除標的是永久刪除，會移除該標的、持倉、股價快取、EPS、估值、主力進出與該標的更新紀錄。
@@ -272,12 +316,13 @@ taskkill /PID <PID> /F
 
 ## 驗證
 
-後端語法檢查。
+後端測試與語法檢查。
 
 macOS / bash:
 
 ```bash
 source .venv/bin/activate
+python -m unittest discover backend/tests
 python -m compileall backend
 ```
 
@@ -285,15 +330,17 @@ Windows cmd:
 
 ```bat
 .venv\Scripts\activate.bat
+python -m unittest discover backend\tests
 python -m compileall backend
 ```
 
-前端 production build。
+前端自動化測試與 production build。
 
 macOS / bash 與 Windows cmd:
 
 ```bash
 cd frontend
+npm run test
 npm run build
 ```
 

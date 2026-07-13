@@ -14,12 +14,12 @@ import requests
 from sqlalchemy import delete, select
 from websockets.sync.client import connect
 
-from .database import (
+from .db.models import (
     FuturesIntradayPoint,
     FuturesSnapshot,
-    SessionLocal,
-    log_crawler_result,
 )
+from .db.session import SessionLocal
+from .db.apply import log_crawler_result
 
 
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")

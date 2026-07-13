@@ -1,0 +1,179 @@
+@media (max-width: 860px) {
+  .shell {
+    width: min(100% - 20px, 1160px);
+    padding-top: 18px;
+  }
+
+  .topbar {
+    align-items: flex-start;
+  }
+
+  .summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .broker-select-field {
+    justify-self: stretch;
+    width: 100%;
+  }
+
+  .futures-main {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .futures-open {
+    justify-items: start;
+  }
+
+  .text-button {
+    width: 100%;
+  }
+
+  .ai-analysis-button {
+    width: auto;
+  }
+
+  .position-row .sell-button {
+    width: auto;
+  }
+}
+
+@media (max-width: 520px) {
+  .summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .broker-summary,
+  .broker-rankings {
+    grid-template-columns: 1fr;
+  }
+
+  .data-quality-facts,
+  .data-quality-components {
+    grid-template-columns: 1fr;
+  }
+
+  .disclosure-meta {
+    align-items: flex-end;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .futures-card {
+    padding: 14px 12px;
+  }
+
+  .futures-header {
+    flex-direction: column;
+  }
+
+  .futures-session {
+    text-align: left;
+  }
+
+  .futures-quote {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .futures-chart {
+    height: 190px;
+  }
+
+  .stock-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .stock-disclosures {
+    padding: 0 12px 12px;
+  }
+
+  .technical-summary {
+    overflow-x: auto;
+  }
+
+  .technical-summary-primary {
+    grid-template-columns: repeat(2, minmax(130px, 1fr));
+    min-width: 280px;
+  }
+
+  .technical-summary-ma {
+    grid-template-columns: repeat(3, minmax(96px, 1fr));
+    min-width: 288px;
+  }
+
+  .technical-summary-volume {
+    grid-template-columns: repeat(2, minmax(128px, 1fr));
+    min-width: 256px;
+  }
+
+  .fundamental-tabs {
+    display: flex;
+  }
+
+  .fundamental-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .fundamental-trend-chart {
+    height: 240px;
+  }
+
+  .fundamental-tooltip {
+    position: static;
+    margin-top: 8px;
+  }
+
+  .ai-analysis-toggle {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ai-analysis-actions {
+    justify-content: stretch;
+  }
+
+  .ai-analysis-button {
+    width: 100%;
+  }
+
+  .ai-analysis-lists {
+    grid-template-columns: 1fr;
+  }
+
+  .technical-chart {
+    height: 280px;
+  }
+
+  .technical-source,
+  footer {
+    flex-direction: column;
+  }
+
+  .position-row {
+    grid-template-columns: 1fr;
+  }
+
+  .position-row .sell-button {
+    width: 100%;
+  }
+
+  .stock-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .stock-actions {
+    justify-content: flex-end;
+  }
+
+  .stock-title strong {
+    font-size: 1.14rem;
+  }
+}

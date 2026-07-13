@@ -18,6 +18,8 @@ frontend/.env.local
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+data/*.sqlite3-wal
+data/*.sqlite3-shm
 
 # Frontend
 node_modules/
