@@ -14,6 +14,14 @@ const AI_FEEDBACK_TAGS = [
   { label: "太籠統", tag: "too_generic" },
   { label: "狀態不合理", tag: "wrong_status" },
 ];
+const FRESHNESS_LABELS = {
+  REALTIME: "即時",
+  CURRENT: "最新",
+  DELAYED: "延遲",
+  STALE: "過期",
+  MISSING: "待更新",
+  NOT_APPLICABLE: "不適用",
+};
 
 
 function loadAiMode(symbol, hasPosition) {
@@ -56,6 +64,7 @@ export function AIAnalysisPopover({
   const panelRef = useRef(null);
   const [activeMode, setActiveMode] = useState(() => loadAiMode(stock.symbol, hasPosition));
   const [panelStyle, setPanelStyle] = useState({});
+  const [clock, setClock] = useState(() => Date.now());
   const {
     analysisResponse,
     loading,
@@ -144,6 +153,12 @@ export function AIAnalysisPopover({
     };
   }, [anchorRef, onClose, open]);
 
+  useEffect(() => {
+    if (!open) return undefined;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [open]);
+
   async function generateAnalysis() {
     await generate();
   }
@@ -164,6 +179,22 @@ export function AIAnalysisPopover({
   const usingRuleSummary = Boolean(!result && ruleResult);
   const modeError = analysisResponse?.errors?.[modeKey];
   const hasAnyAnalysis = Boolean(analysisResponse?.analyses?.unheld || analysisResponse?.analyses?.held);
+  const providerHealth = analysisResponse?.provider_health || [];
+  const configuredProviders = providerHealth.filter((item) => item.configured !== false);
+  const availableProviders = configuredProviders.filter((item) => {
+    if (["HEALTHY", "DEGRADED"].includes(item.status)) return true;
+    if (item.status === "COOLDOWN" && item.cooldown_until) {
+      return new Date(item.cooldown_until).getTime() <= clock;
+    }
+    return false;
+  });
+  const providersUnavailable = providerHealth.length > 0 && availableProviders.length === 0;
+  const cooldowns = configuredProviders
+    .filter((item) => item.cooldown_until && new Date(item.cooldown_until).getTime() > clock)
+    .map((item) => ({
+      ...item,
+      remaining: Math.max(0, Math.ceil((new Date(item.cooldown_until).getTime() - clock) / 1000)),
+    }));
 
   return createPortal(
     <section
@@ -210,12 +241,27 @@ export function AIAnalysisPopover({
             className="text-button ai-analysis-button"
             type="button"
             onClick={generateAnalysis}
-            disabled={loading || running}
+            disabled={loading || running || providersUnavailable}
           >
             {loading || running ? <Loader2 className="spin" size={15} /> : <Sparkles size={15} />}
             {running ? "分析處理中" : hasAnyAnalysis ? "更新全部分析" : "產生全部分析"}
           </button>
         </div>
+        {cooldowns.length > 0 && (
+          <div className="ai-provider-health warning">
+            <AlertCircle size={15} />
+            <span>
+              {cooldowns.map((item) => `${item.provider} ${Math.floor(item.remaining / 60)}:${String(item.remaining % 60).padStart(2, "0")}`).join(" · ")}
+              {availableProviders.length ? " · 將自動切換可用 provider" : " · 冷卻期間已停用重複請求"}
+            </span>
+          </div>
+        )}
+        {providerHealth.length > 0 && configuredProviders.length === 0 && (
+          <div className="ai-provider-health warning">
+            <AlertCircle size={15} />
+            <span>尚未設定可用的免費 AI provider，目前使用本機規則分析。</span>
+          </div>
+        )}
         {(error || modeError) && (
           <div className="ai-analysis-error">
             <AlertCircle size={15} />
@@ -229,17 +275,18 @@ export function AIAnalysisPopover({
           </div>
         ) : analysis ? (
           <>
+            {result && <DataQualityBadge quality={stock.data_quality_summary?.categories?.AI_ANALYSIS} />}
+            <div className="ai-analysis-source rule">規則判斷</div>
+            <div className="ai-status-row">
+              <span>{activeMode === "HELD" ? "持有判斷" : "進場判斷"}</span>
+              <strong>{ruleResult?.analysis?.overall_status || analysis.overall_status}</strong>
+            </div>
             <div className={`ai-analysis-source ${usingRuleSummary ? "rule" : "ai"}`}>
               {usingRuleSummary
                 ? running
-                  ? "AI 分析處理中，先顯示規則摘要"
-                  : "目前顯示規則摘要"
-                : "AI 分析結果"}
-            </div>
-            <DataQualityBadge quality={stock.data_quality_summary?.categories?.AI_ANALYSIS} />
-            <div className="ai-status-row">
-              <span>{activeMode === "HELD" ? "持有判斷" : "進場判斷"}</span>
-              <strong>{analysis.overall_status}</strong>
+                  ? "AI 解讀處理中，暫以規則說明"
+                  : "規則解讀"
+                : "AI 解讀"}
             </div>
             <p>{aiText(analysis.summary)}</p>
             <div className="ai-analysis-lists">
@@ -274,18 +321,52 @@ export function AIAnalysisPopover({
               <small>
                 {result.provider} · {result.model}
                 {result.cached ? " · 使用快取" : " · 新產生"}
-                {" · 分析時間 "}
+                {" · AI 解讀完成時間 "}
                 {formatDate(result.analysis_requested_at || result.generated_at)}
               </small>
             ) : (
               <small>rule_based · 本機規則摘要 · 分析時間 {formatDate(ruleResult?.generated_at)}</small>
+            )}
+            {analysisResponse?.run && (
+              <small>
+                請求方式 {analysisResponse.run.request_strategy}
+                {analysisResponse.run.finished_at && ["success", "partial"].includes(analysisResponse.run.status)
+                  ? ` · 分析完成 ${formatDate(analysisResponse.run.finished_at)}`
+                  : analysisResponse.run.finished_at && analysisResponse.run.status === "failed"
+                    ? ` · 最近嘗試失敗 ${formatDate(analysisResponse.run.finished_at)}`
+                    : ""}
+              </small>
+            )}
+            {analysisResponse?.data_as_of?.length > 0 && (
+              <div className="ai-data-as-of">
+                <strong>AI 使用資料截至</strong>
+                <div>
+                  {analysisResponse.data_as_of
+                    .filter((item) => item.freshness_status !== "NOT_APPLICABLE")
+                    .map((item) => (
+                      <span key={item.category} className={item.freshness_status.toLowerCase()}>
+                        <b>{item.label}</b>
+                        {item.data_period || item.data_date || (item.fetched_at ? formatDate(item.fetched_at) : "待更新")}
+                        <em>{FRESHNESS_LABELS[item.freshness_status] || item.freshness_status}{item.is_cached ? " · 快取" : ""}</em>
+                      </span>
+                    ))}
+                </div>
+              </div>
+            )}
+            {analysisResponse?.stale_items?.length > 0 && (
+              <div className="ai-stale-items">
+                <strong>資料限制</strong>
+                <ul>
+                  {analysisResponse.stale_items.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              </div>
             )}
             <small>{analysis.disclaimer}</small>
           </>
         ) : (
           <div className="ai-analysis-empty">
             {activeMode === "HELD"
-              ? "持有分析只使用成交均價與每股／百分比損益，不傳股數、總成本或資產資料。"
+              ? "持有分析會使用成交均價、每股／百分比損益與公開指標；唯一禁止傳送的是持有股數。"
               : "未持有分析只使用行情、估值、基本面、技術面與籌碼摘要。"}
           </div>
         )}

@@ -16,11 +16,9 @@ from ..ai_analysis import (
     AI_MODE_HELD,
     AI_MODE_UNHELD,
     AIConfigurationError,
-    ai_provider_identity,
-    build_ai_provider,
 )
 from ..config import get_settings
-from ..db.models import Stock, StockAIAnalysis, StockAIFeedback, StockPosition
+from ..db.models import Stock, StockAIAnalysis, StockAIAnalysisRun, StockAIFeedback, StockPosition
 from ..db.session import get_session
 from ..market_data import normalize_symbol
 from ..schema.ai import (
@@ -32,14 +30,17 @@ from ..schema.ai import (
 from ..services.ai_service import (
     _ai_analysis_batch_response,
     _ai_log_record,
-    _enqueue_ai_mode_with_fallback,
-    _generate_ai_mode_with_fallback,
     _json_field,
     _latest_ai_cache_row,
     _latest_ai_inflight_row,
-    _openrouter_model_candidates,
     _rule_based_result_response,
-    _run_ai_analysis_job,
+)
+from ..services.ai_batch_service import (
+    build_analysis_response,
+    enqueue_analysis_run,
+    provider_health_responses,
+    run_analysis_job,
+    run_analysis_job_in_session,
 )
 
 
@@ -63,40 +64,7 @@ def get_latest_stock_ai_analysis(
     if not stock:
         raise HTTPException(status_code=404, detail="Stock not found")
 
-    modes = [AI_MODE_UNHELD]
-    if session.scalar(select(StockPosition).where(StockPosition.stock_id == stock.id)):
-        modes.append(AI_MODE_HELD)
-    rule_based = {mode: _rule_based_result_response(stock, session, mode) for mode in modes}
-    try:
-        provider_id, model = ai_provider_identity(settings, provider)
-    except AIConfigurationError as exc:
-        errors = {mode.lower(): str(exc) for mode in modes}
-        return _ai_analysis_batch_response(stock.symbol, {}, errors=errors, rule_based=rule_based)
-    candidate_models = _openrouter_model_candidates(model) if provider_id == "openrouter" else [model]
-    results = {
-        mode: (cached_row, True)
-        for mode in modes
-        if (
-            cached_row := next(
-                (
-                    row
-                    for candidate_model in candidate_models
-                    if (row := _latest_ai_cache_row(session, stock, provider_id, candidate_model, mode)) is not None
-                ),
-                None,
-            )
-        )
-        is not None
-    }
-    running = {
-        mode.lower(): True
-        for mode in modes
-        if any(
-            _latest_ai_inflight_row(session, stock, provider_id, candidate_model, mode) is not None
-            for candidate_model in candidate_models
-        )
-    }
-    return _ai_analysis_batch_response(stock.symbol, results, running=running, rule_based=rule_based)
+    return build_analysis_response(session, stock, requested_provider=provider)
 
 
 @router.post("/api/stocks/{symbol}/ai-analysis", response_model=StockAIAnalysisResponse)
@@ -116,54 +84,24 @@ def create_stock_ai_analysis(
     if not stock:
         raise HTTPException(status_code=404, detail="Stock not found")
 
-    modes = [AI_MODE_UNHELD]
-    if session.scalar(select(StockPosition).where(StockPosition.stock_id == stock.id)):
-        modes.append(AI_MODE_HELD)
-    rule_based = {mode: _rule_based_result_response(stock, session, mode) for mode in modes}
-    try:
-        ai_provider = build_ai_provider(settings, payload.provider)
-    except AIConfigurationError as exc:
-        errors = {mode.lower(): str(exc) for mode in modes}
-        return _ai_analysis_batch_response(stock.symbol, {}, errors=errors, rule_based=rule_based)
-
-    results: dict[str, tuple[StockAIAnalysis, bool]] = {}
-    errors: dict[str, str] = {}
-    running: dict[str, bool] = {}
-    for mode in modes:
+    run, should_run = enqueue_analysis_run(
+        session,
+        stock,
+        requested_provider=payload.provider,
+        force_refresh=payload.force_refresh,
+    )
+    if should_run and run.status == "queued":
         if background_tasks is None:
-            row, cached, error, is_running = _generate_ai_mode_with_fallback(
-                session,
-                stock,
-                ai_provider,
-                mode,
-                payload.force_refresh,
-            )
-            queued_row_id = None
+            run_analysis_job_in_session(session, run.id)
         else:
-            row, cached, error, is_running, queued_row_id = _enqueue_ai_mode_with_fallback(
-                session,
-                stock,
-                ai_provider,
-                mode,
-                payload.force_refresh,
-            )
-        key = mode.lower()
-        if row is not None:
-            results[mode] = (row, cached)
-        elif is_running:
-            running[key] = True
-            if queued_row_id is not None:
-                background_tasks.add_task(_run_ai_analysis_job, queued_row_id)
-        elif error:
-            errors[key] = error
-
-    if not results:
-        if running:
+            background_tasks.add_task(run_analysis_job, run.id)
             response.status_code = status.HTTP_202_ACCEPTED
-        return _ai_analysis_batch_response(stock.symbol, results, errors, running, rule_based=rule_based)
-    if running:
-        response.status_code = status.HTTP_202_ACCEPTED
-    return _ai_analysis_batch_response(stock.symbol, results, errors, running, rule_based=rule_based)
+    return build_analysis_response(session, stock, requested_provider=payload.provider)
+
+
+@router.get("/api/ai-analysis/provider-health")
+def get_ai_provider_health(session: Session = Depends(get_session)):
+    return provider_health_responses(session)
 
 
 @router.post("/api/stocks/{symbol}/ai-analysis/{mode}/feedback", response_model=StockAIAnalysisFeedbackResponse)
@@ -304,6 +242,16 @@ def ai_analysis_logs_summary(
             increment(feedback_by_tag, str(tag))
 
     total = len(rows)
+    run_ids = sorted({row.run_id for row, _ in rows if row.run_id is not None})
+    run_rows = (
+        session.scalars(select(StockAIAnalysisRun).where(StockAIAnalysisRun.id.in_(run_ids))).all()
+        if run_ids else []
+    )
+    by_request_strategy: dict[str, int] = {}
+    by_run_status: dict[str, int] = {}
+    for run in run_rows:
+        increment(by_request_strategy, run.request_strategy)
+        increment(by_run_status, run.status)
     return {
         "total": total,
         "by_status": by_status,
@@ -320,6 +268,12 @@ def ai_analysis_logs_summary(
             "by_rating": feedback_by_rating,
             "by_tag": feedback_by_tag,
         },
+        "runs": {
+            "total": len(run_rows),
+            "by_status": by_run_status,
+            "by_request_strategy": by_request_strategy,
+        },
+        "provider_health": [item.model_dump(mode="json") for item in provider_health_responses(session)],
     }
 
 
@@ -397,6 +351,7 @@ def export_ai_analysis_logs(
         "validation_errors",
         "quality_flags",
         "grounding_errors",
+        "run",
         "feedback",
         "created_at",
         "updated_at",

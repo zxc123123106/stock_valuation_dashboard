@@ -10,7 +10,11 @@ import { queryKeys } from "../api/queryKeys";
 
 
 export function hasRunningAiAnalysis(response) {
-  return Boolean(response?.running?.unheld || response?.running?.held);
+  return Boolean(
+    response?.running?.unheld
+    || response?.running?.held
+    || ["queued", "running"].includes(response?.run?.status),
+  );
 }
 
 
@@ -26,6 +30,10 @@ export function mergeAiAnalysisResponse(current, next) {
       unheld: next.rule_based?.unheld || current.rule_based?.unheld || null,
       held: next.rule_based?.held || current.rule_based?.held || null,
     },
+    run: next.run || current.run || null,
+    provider_health: next.provider_health || current.provider_health || [],
+    data_as_of: next.data_as_of || current.data_as_of || [],
+    stale_items: next.stale_items || [],
   };
 }
 

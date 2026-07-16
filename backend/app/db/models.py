@@ -33,6 +33,7 @@ class Stock(Base):
     financial_quarters: Mapped[list["StockFinancialQuarter"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
     institutional_trading: Mapped[list["StockInstitutionalTrading"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
     ai_analyses: Mapped[list["StockAIAnalysis"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
+    ai_analysis_runs: Mapped[list["StockAIAnalysisRun"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
     data_quality_states: Mapped[list["StockDataQualityState"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
 
 
@@ -307,6 +308,7 @@ class StockAIAnalysis(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("stock_ai_analysis_runs.id", ondelete="SET NULL"), nullable=True, index=True)
     provider: Mapped[str] = mapped_column(String(24), index=True)
     model: Mapped[str] = mapped_column(String(120))
     analysis_mode: Mapped[str] = mapped_column(String(16), default="GENERAL", index=True)
@@ -326,6 +328,55 @@ class StockAIAnalysis(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     stock: Mapped[Stock] = relationship(back_populates="ai_analyses")
+    run: Mapped["StockAIAnalysisRun | None"] = relationship(back_populates="analyses")
+
+
+class StockAIAnalysisRun(Base):
+    __tablename__ = "stock_ai_analysis_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str | None] = mapped_column(String(24), nullable=True, index=True)
+    model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(40), index=True)
+    rule_version: Mapped[str] = mapped_column(String(40), index=True)
+    requested_modes_json: Mapped[str] = mapped_column(Text)
+    analysis_snapshot_json: Mapped[str] = mapped_column(Text)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), index=True)
+    rule_results_json: Mapped[str] = mapped_column(Text)
+    data_as_of_json: Mapped[str] = mapped_column(Text, default="[]")
+    stale_items_json: Mapped[str] = mapped_column(Text, default="[]")
+    request_strategy: Mapped[str] = mapped_column(String(64), default="batch")
+    status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
+    provider_metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    stock: Mapped[Stock] = relationship(back_populates="ai_analysis_runs")
+    analyses: Mapped[list[StockAIAnalysis]] = relationship(back_populates="run")
+
+
+class AIProviderHealth(Base):
+    __tablename__ = "ai_provider_health"
+    __table_args__ = (UniqueConstraint("provider", "model", name="uq_ai_provider_health_identity"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(24), index=True)
+    model: Mapped[str] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="HEALTHY", index=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
 class StockAIFeedback(Base):

@@ -1071,6 +1071,8 @@ def _compact_ai_stock_summary(
             (
                 "current_pe",
                 "pe_average_3y",
+                "pe_min_3y",
+                "pe_max_3y",
                 "current_pe_vs_average_percent",
                 "current_pe_position_in_3y_range_percent",
                 "pe_data_date",
@@ -1114,12 +1116,22 @@ def _compact_ai_stock_summary(
                 (
                     "date",
                     "close_price_twd",
+                    "is_provisional",
+                    "ma5",
+                    "ma10",
+                    "ma20",
+                    "ma60",
+                    "ma120",
+                    "ma240",
                     "price_vs_ma5_percent",
                     "price_vs_ma10_percent",
                     "price_vs_ma20_percent",
                     "price_vs_ma60_percent",
                     "price_vs_ma120_percent",
                     "price_vs_ma240_percent",
+                    "today_volume_lots",
+                    "volume_ma5_lots",
+                    "volume_ma20_lots",
                     "volume_as_percent_of_ma20",
                     "volume_difference_vs_ma20_percent",
                 ),
@@ -1172,12 +1184,18 @@ def _compact_chip(value) -> dict | None:
     sell_rows = value.get("top_sell_brokers") or []
     if buy_rows:
         compact["top_buy_brokers"] = [
-            _compact_dict(row, ("rank", "broker_name", "net_volume_lots"))
+            _compact_dict(
+                row,
+                ("rank", "broker_name", "buy_volume_lots", "sell_volume_lots", "net_volume_lots"),
+            )
             for row in buy_rows[:3]
         ]
     if sell_rows:
         compact["top_sell_brokers"] = [
-            _compact_dict(row, ("rank", "broker_name", "net_volume_lots"))
+            _compact_dict(
+                row,
+                ("rank", "broker_name", "buy_volume_lots", "sell_volume_lots", "net_volume_lots"),
+            )
             for row in sell_rows[:3]
         ]
     return compact or None
@@ -1324,11 +1342,31 @@ def _ai_quality_components(stock: Stock, session: Session, now: datetime) -> lis
             latest_attempt_after_success
             and latest_attempt.status in {"queued", "running"}
         )
+        snapshot_matches_current_data = True
+        if success and getattr(success, "run", None) is not None:
+            saved_items = _json_field(success.run.data_as_of_json) or []
+            current_states = {
+                state.category: state
+                for state in session.scalars(
+                    select(StockDataQualityState).where(StockDataQualityState.stock_id == stock.id)
+                ).all()
+            }
+            for saved_item in saved_items:
+                state = current_states.get(saved_item.get("category"))
+                current_date = state.data_date.isoformat() if state and state.data_date else None
+                current_period = state.data_period if state else None
+                if (
+                    current_date != saved_item.get("data_date")
+                    or current_period != saved_item.get("data_period")
+                ):
+                    snapshot_matches_current_data = False
+                    break
         current = bool(
             success
             and success.prompt_version == PROMPT_VERSION
             and success.analysis_date == quality_as_taipei(now).date()
             and not failed_after_success
+            and snapshot_matches_current_data
         )
         latest_failed = bool(latest_attempt and latest_attempt.status in {"failed", "format_fallback"})
         sync_status = (
@@ -1561,6 +1599,26 @@ def _rule_based_ai_analysis(summary: dict, analysis_mode: str) -> StockAIAnalysi
         else:
             status_text = "等待"
         summary_text = "未持有評估需避免追高，先看估值位置、基本面延續性、技術趨勢與籌碼是否形成同向訊號。"
+
+    quality_context = summary.get("data_quality_context") or {}
+    quality_items = quality_context.get("items") or []
+    critical_quality = [
+        item for item in quality_items
+        if item.get("freshness_status") in {"STALE", "MISSING"}
+    ]
+    if critical_quality:
+        labels = "、".join(str(item.get("label") or item.get("category")) for item in critical_quality[:3])
+        watch.insert(
+            0,
+            grounded(
+                f"{labels}資料過期或缺失，本次判斷信心已降低，更新後應重新分析。",
+                [f"data_quality.{str(item.get('category')).lower()}.freshness_status" for item in critical_quality[:3]],
+            ),
+        )
+        if analysis_mode == AI_MODE_UNHELD and status_text == "分批布局":
+            status_text = "等待"
+        elif analysis_mode == AI_MODE_HELD and status_text == "續抱":
+            status_text = "觀察"
 
     watch.append(grounded("後續優先追蹤 PE 位置、月營收與 EPS 趨勢、MA20/MA60 以及主力買賣超是否同向。", []))
     return StockAIAnalysisContent(
@@ -2360,6 +2418,7 @@ def _ai_feedback_record(feedback: StockAIFeedback | None) -> dict | None:
 
 
 def _ai_log_record(row: StockAIAnalysis, symbol: str, feedback: StockAIFeedback | None = None) -> dict:
+    run = getattr(row, "run", None)
     return {
         "id": row.id,
         "symbol": symbol,
@@ -2378,6 +2437,21 @@ def _ai_log_record(row: StockAIAnalysis, symbol: str, feedback: StockAIFeedback 
         "validation_errors": _json_field(row.validation_errors_json) or [],
         "quality_flags": _json_field(row.quality_flags_json) or [],
         "grounding_errors": _json_field(row.grounding_errors_json) or [],
+        "run": None if run is None else {
+            "id": run.id,
+            "status": run.status,
+            "requested_modes": _json_field(run.requested_modes_json) or [],
+            "prompt_version": run.prompt_version,
+            "rule_version": run.rule_version,
+            "snapshot_hash": run.snapshot_hash,
+            "request_strategy": run.request_strategy,
+            "data_as_of": _json_field(run.data_as_of_json) or [],
+            "stale_items": _json_field(run.stale_items_json) or [],
+            "analysis_snapshot": _json_field(run.analysis_snapshot_json),
+            "requested_at": run.requested_at.isoformat() if run.requested_at else None,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        },
         "feedback": _ai_feedback_record(feedback),
         "created_at": row.created_at.isoformat(),
         "updated_at": row.updated_at.isoformat(),

@@ -19,6 +19,14 @@ from .application import (
     _rule_based_result_response,
     _run_ai_analysis_job,
 )
+from .ai_batch_service import (
+    build_analysis_response,
+    build_analysis_snapshot,
+    enqueue_analysis_run,
+    provider_health_responses,
+    run_analysis_job,
+    run_analysis_job_in_session,
+)
 
 
 def acquire_ai_analysis_job_lock() -> None:

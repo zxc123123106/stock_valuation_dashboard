@@ -147,6 +147,10 @@
     grid-template-columns: 1fr;
   }
 
+  .ai-data-as-of > div {
+    grid-template-columns: 1fr;
+  }
+
   .technical-chart {
     height: 280px;
   }

@@ -783,8 +783,10 @@ class AIAnalysisTest(unittest.TestCase):
         self.assertNotIn("position", compact)
         self.assertEqual(len(compact["valuation_scenarios"]), 2)
         self.assertNotIn("source", compact["quote"])
-        self.assertNotIn("ma5", compact["technical"]["latest"])
+        self.assertEqual(compact["technical"]["latest"]["ma5"], 580)
+        self.assertEqual(compact["technical"]["latest"]["ma10"], 570)
         self.assertEqual(len(compact["chip"]["top_buy_brokers"]), 3)
+        self.assertEqual(compact["chip"]["top_buy_brokers"][0]["buy_volume_lots"], 100)
         self.assertIn("quote.current_price_twd", compact["available_evidence_keys"])
         self.assertNotIn("position.share_count", compact["available_evidence_keys"])
 
@@ -844,18 +846,12 @@ class AIAnalysisTest(unittest.TestCase):
         self.assertEqual(summary["feedback"]["by_rating"]["not_useful"], 1)
         self.assertEqual(summary["feedback"]["by_tag"]["hallucination"], 1)
 
-    def test_ai_analysis_endpoint_runs_unheld_and_held_together_when_position_exists(self) -> None:
+    def test_ai_analysis_endpoint_enqueues_one_batch_when_position_exists(self) -> None:
         for force_refresh in (False, True):
             with self.subTest(force_refresh=force_refresh):
                 engine = create_engine("sqlite:///:memory:", future=True)
                 Base.metadata.create_all(engine)
                 Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
-                calls = []
-
-                def fake_generate(session, stock, provider, mode, force_refresh):
-                    calls.append((mode, force_refresh))
-                    return SimpleNamespace(analysis_mode=mode), False, None, False
-
                 with Session() as session:
                     stock = Stock(symbol="4958", name="臻鼎-KY", asset_type="STOCK", is_active=True)
                     session.add(stock)
@@ -864,19 +860,12 @@ class AIAnalysisTest(unittest.TestCase):
                     session.add(StockPosition(stock_id=stock.id, buy_price=Decimal("491.25")))
                     session.commit()
 
+                    fake_run = SimpleNamespace(id=17, status="queued")
+                    expected = {"symbol": "4958", "request_strategy": "batch"}
                     with (
-                        patch("backend.app.api.ai.build_ai_provider", return_value=SimpleNamespace(provider_id="openrouter")),
-                        patch("backend.app.api.ai._generate_ai_mode_with_fallback", side_effect=fake_generate),
-                        patch(
-                            "backend.app.api.ai._ai_analysis_batch_response",
-                            side_effect=lambda symbol, results, errors=None, running=None, rule_based=None: {
-                                "symbol": symbol,
-                                "modes": sorted(results.keys()),
-                                "errors": errors or {},
-                                "running": running or {},
-                                "rule_based": sorted((rule_based or {}).keys()),
-                            },
-                        ),
+                        patch("backend.app.api.ai.enqueue_analysis_run", return_value=(fake_run, True)) as enqueue,
+                        patch("backend.app.api.ai.run_analysis_job_in_session") as run_job,
+                        patch("backend.app.api.ai.build_analysis_response", return_value=expected),
                     ):
                         result = create_stock_ai_analysis(
                             "4958",
@@ -885,9 +874,10 @@ class AIAnalysisTest(unittest.TestCase):
                             session=session,
                         )
 
-                self.assertEqual(result["modes"], [AI_MODE_HELD, AI_MODE_UNHELD])
-                self.assertEqual(result["rule_based"], [AI_MODE_HELD, AI_MODE_UNHELD])
-                self.assertEqual(calls, [(AI_MODE_UNHELD, force_refresh), (AI_MODE_HELD, force_refresh)])
+                self.assertEqual(result, expected)
+                self.assertEqual(enqueue.call_count, 1)
+                self.assertEqual(enqueue.call_args.kwargs["force_refresh"], force_refresh)
+                run_job.assert_called_once_with(session, 17)
 
     def test_ai_analysis_endpoint_returns_rule_summary_when_provider_is_not_configured(self) -> None:
         engine = create_engine("sqlite:///:memory:", future=True)
@@ -899,9 +889,17 @@ class AIAnalysisTest(unittest.TestCase):
             session.add(stock)
             session.commit()
 
-            with patch(
-                "backend.app.api.ai.build_ai_provider",
-                side_effect=AIConfigurationError("OPENROUTER_MODEL is not configured."),
+            fallback_response = SimpleNamespace(
+                analyses=SimpleNamespace(unheld=None),
+                rule_based=SimpleNamespace(unheld=SimpleNamespace()),
+                errors={"unheld": "所有免費 provider 目前不可用。"},
+            )
+            with (
+                patch(
+                    "backend.app.api.ai.enqueue_analysis_run",
+                    return_value=(SimpleNamespace(id=1, status="failed"), False),
+                ),
+                patch("backend.app.api.ai.build_analysis_response", return_value=fallback_response),
             ):
                 result = create_stock_ai_analysis(
                     "8064",
@@ -914,7 +912,7 @@ class AIAnalysisTest(unittest.TestCase):
 
         self.assertIsNone(result.analyses.unheld)
         self.assertIsNotNone(result.rule_based.unheld)
-        self.assertIn("not configured", result.errors["unheld"])
+        self.assertIn("provider", result.errors["unheld"])
 
     def test_enqueued_ai_job_persists_success_result(self) -> None:
         import backend.app.services.application as main

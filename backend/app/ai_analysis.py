@@ -14,7 +14,8 @@ from .schemas import StockAIAnalysisContent, StockAIAnalysisEvidenceText
 GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_DISCLAIMER = "本分析僅依據既有資料整理，不構成任何投資建議。"
-PROMPT_VERSION = "v4-analysis-time"
+PROMPT_VERSION = "v5-batched-rule-grounded"
+RULE_VERSION = "v1"
 AI_MODE_GENERAL = "GENERAL"
 AI_MODE_UNHELD = "UNHELD"
 AI_MODE_HELD = "HELD"
@@ -36,7 +37,9 @@ _EVIDENCE_REPAIRED_WARNING = "warning: evidence keys repaired"
 
 
 class AIAnalysisError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class AIConfigurationError(AIAnalysisError):
@@ -53,11 +56,30 @@ class AIProviderResult:
     grounding_errors: list[str]
 
 
+@dataclass(frozen=True)
+class AIProviderBatchResult:
+    analyses: dict[str, AIProviderResult]
+    raw_response_text: str
+    provider_metadata: dict[str, Any]
+
+
 class AIProvider(Protocol):
     provider_id: str
     model: str
 
-    def analyze_stock(self, stock_summary: dict[str, Any], analysis_mode: str) -> AIProviderResult:
+    def analyze_stock(
+        self,
+        stock_summary: dict[str, Any],
+        analysis_mode: str,
+        rule_status: str | None = None,
+    ) -> AIProviderResult:
+        ...
+
+    def analyze_stock_batch(
+        self,
+        stock_summaries: dict[str, dict[str, Any]],
+        rule_statuses: dict[str, str],
+    ) -> AIProviderBatchResult:
         ...
 
 
@@ -68,8 +90,13 @@ class GeminiProvider:
     timeout_seconds: int = 45
     provider_id: str = "gemini"
 
-    def analyze_stock(self, stock_summary: dict[str, Any], analysis_mode: str) -> AIProviderResult:
-        prompts = _analysis_prompts(stock_summary, analysis_mode)
+    def analyze_stock(
+        self,
+        stock_summary: dict[str, Any],
+        analysis_mode: str,
+        rule_status: str | None = None,
+    ) -> AIProviderResult:
+        prompts = _analysis_prompts(stock_summary, analysis_mode, rule_status=rule_status)
         payload = {
             "system_instruction": {"parts": [{"text": prompts.system}]},
             "contents": [{"role": "user", "parts": [{"text": prompts.user}]}],
@@ -77,6 +104,11 @@ class GeminiProvider:
                 "temperature": 0.2,
                 "maxOutputTokens": 1400,
                 "responseMimeType": "application/json",
+                **(
+                    {"responseJsonSchema": analysis_json_schema(analysis_mode, rule_owned=True)}
+                    if rule_status is not None
+                    else {}
+                ),
             },
         }
         try:
@@ -95,6 +127,7 @@ class GeminiProvider:
             raw_text,
             analysis_mode,
             evidence_keys=extract_evidence_keys(stock_summary),
+            status_override=rule_status,
         )
         candidate = (data.get("candidates") or [{}])[0]
         return AIProviderResult(
@@ -111,6 +144,49 @@ class GeminiProvider:
             grounding_errors=grounding_errors_from_validation_errors(errors),
         )
 
+    def analyze_stock_batch(
+        self,
+        stock_summaries: dict[str, dict[str, Any]],
+        rule_statuses: dict[str, str],
+    ) -> AIProviderBatchResult:
+        prompts = _batch_analysis_prompts(stock_summaries, rule_statuses)
+        payload = {
+            "system_instruction": {"parts": [{"text": prompts.system}]},
+            "contents": [{"role": "user", "parts": [{"text": prompts.user}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 2600,
+                "responseMimeType": "application/json",
+                "responseJsonSchema": batch_analysis_json_schema(tuple(stock_summaries)),
+            },
+        }
+        try:
+            response = requests.post(
+                GEMINI_GENERATE_URL.format(model=self.model),
+                headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
+                json=payload,
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise AIAnalysisError(f"Gemini API request failed: {exc}") from exc
+        _raise_for_provider_error(response, "Gemini")
+        data = response.json()
+        raw_text = _gemini_text(data)
+        candidate = (data.get("candidates") or [{}])[0]
+        metadata = {
+            "response_id": data.get("responseId"),
+            "model_version": data.get("modelVersion"),
+            "finish_reason": candidate.get("finishReason"),
+            "usage": data.get("usageMetadata"),
+            "structured_output_mode": "batch_json_schema",
+        }
+        return _normalize_batch_provider_result(
+            raw_text,
+            stock_summaries,
+            rule_statuses,
+            metadata,
+        )
+
 
 @dataclass(frozen=True)
 class OpenRouterProvider:
@@ -119,8 +195,13 @@ class OpenRouterProvider:
     timeout_seconds: int = 45
     provider_id: str = "openrouter"
 
-    def analyze_stock(self, stock_summary: dict[str, Any], analysis_mode: str) -> AIProviderResult:
-        prompts = _analysis_prompts(stock_summary, analysis_mode)
+    def analyze_stock(
+        self,
+        stock_summary: dict[str, Any],
+        analysis_mode: str,
+        rule_status: str | None = None,
+    ) -> AIProviderResult:
+        prompts = _analysis_prompts(stock_summary, analysis_mode, rule_status=rule_status)
         strict_payload = {
             "model": self.model,
             "messages": [
@@ -136,7 +217,7 @@ class OpenRouterProvider:
                 "json_schema": {
                     "name": f"stock_analysis_{analysis_mode.lower()}",
                     "strict": True,
-                    "schema": analysis_json_schema(analysis_mode),
+                    "schema": analysis_json_schema(analysis_mode, rule_owned=rule_status is not None),
                 },
             },
         }
@@ -164,6 +245,7 @@ class OpenRouterProvider:
             raw_text,
             analysis_mode,
             evidence_keys=extract_evidence_keys(stock_summary),
+            status_override=rule_status,
         )
         return AIProviderResult(
             analysis=analysis,
@@ -180,6 +262,67 @@ class OpenRouterProvider:
             validation_errors=errors,
             quality_flags=quality_flags_from_validation_errors(errors),
             grounding_errors=grounding_errors_from_validation_errors(errors),
+        )
+
+    def analyze_stock_batch(
+        self,
+        stock_summaries: dict[str, dict[str, Any]],
+        rule_statuses: dict[str, str],
+    ) -> AIProviderBatchResult:
+        prompts = _batch_analysis_prompts(stock_summaries, rule_statuses)
+        modes = tuple(stock_summaries)
+        strict_payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": prompts.system},
+                {"role": "user", "content": prompts.user},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 4200,
+            "reasoning": {"exclude": True},
+            "provider": {"require_parameters": True},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "stock_analysis_batch",
+                    "strict": True,
+                    "schema": batch_analysis_json_schema(modes),
+                },
+            },
+        }
+        response = self._post(strict_payload)
+        structured_output_mode = "batch_json_schema"
+        routing_fallback_reason = None
+        if _openrouter_requires_relaxed_routing(response):
+            relaxed_payload = {
+                **strict_payload,
+                "provider": {"require_parameters": False},
+                "response_format": {"type": "json_object"},
+            }
+            response = self._post(relaxed_payload)
+            structured_output_mode = "batch_json_object_fallback"
+            routing_fallback_reason = "No provider endpoint accepted all strict JSON schema parameters."
+        _raise_for_provider_error(response, "OpenRouter")
+        data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            raise AIAnalysisError("OpenRouter did not return any choices.")
+        choice = choices[0]
+        raw_text = _message_content_text(choice.get("message") or {})
+        metadata = {
+            "id": data.get("id"),
+            "created": data.get("created"),
+            "finish_reason": choice.get("finish_reason"),
+            "native_finish_reason": choice.get("native_finish_reason"),
+            "usage": data.get("usage"),
+            "structured_output_mode": structured_output_mode,
+            "routing_fallback_reason": routing_fallback_reason,
+        }
+        return _normalize_batch_provider_result(
+            raw_text,
+            stock_summaries,
+            rule_statuses,
+            metadata,
         )
 
     def _post(self, payload: dict[str, Any]) -> requests.Response:
@@ -272,7 +415,7 @@ def grounding_errors_from_validation_errors(errors: list[str]) -> list[str]:
     ]
 
 
-def analysis_json_schema(analysis_mode: str) -> dict[str, Any]:
+def analysis_json_schema(analysis_mode: str, *, rule_owned: bool = False) -> dict[str, Any]:
     allowed = list(_allowed_statuses(analysis_mode))
     grounded_text_schema = {
         "type": "object",
@@ -300,36 +443,56 @@ def analysis_json_schema(analysis_mode: str) -> dict[str, Any]:
         "required": ["text", "evidence_keys"],
         "additionalProperties": False,
     }
+    properties = {
+        "summary": grounded_text_schema,
+        "positive_points": {
+            "type": "array",
+            "items": grounded_point_schema,
+            "maxItems": 3,
+        },
+        "risk_points": {
+            "type": "array",
+            "items": grounded_point_schema,
+            "maxItems": 3,
+        },
+        "watch_points": {
+            "type": "array",
+            "items": grounded_point_schema,
+            "maxItems": 3,
+        },
+    }
+    required = ["summary", "positive_points", "risk_points", "watch_points"]
+    if not rule_owned:
+        properties = {
+            "overall_status": {"type": "string", "enum": allowed},
+            **properties,
+            "disclaimer": {"type": "string", "maxLength": 120},
+        }
+        required = ["overall_status", *required, "disclaimer"]
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+
+
+def batch_analysis_json_schema(modes: tuple[str, ...]) -> dict[str, Any]:
+    mode_keys = [mode.lower() for mode in modes]
     return {
         "type": "object",
         "properties": {
-            "overall_status": {"type": "string", "enum": allowed},
-            "summary": grounded_text_schema,
-            "positive_points": {
-                "type": "array",
-                "items": grounded_point_schema,
-                "maxItems": 3,
-            },
-            "risk_points": {
-                "type": "array",
-                "items": grounded_point_schema,
-                "maxItems": 3,
-            },
-            "watch_points": {
-                "type": "array",
-                "items": grounded_point_schema,
-                "maxItems": 3,
-            },
-            "disclaimer": {"type": "string", "maxLength": 120},
+            "analyses": {
+                "type": "object",
+                "properties": {
+                    mode.lower(): analysis_json_schema(mode, rule_owned=True)
+                    for mode in modes
+                },
+                "required": mode_keys,
+                "additionalProperties": False,
+            }
         },
-        "required": [
-            "overall_status",
-            "summary",
-            "positive_points",
-            "risk_points",
-            "watch_points",
-            "disclaimer",
-        ],
+        "required": ["analyses"],
         "additionalProperties": False,
     }
 
@@ -347,6 +510,7 @@ def normalize_ai_analysis_with_errors(
     value: Any,
     analysis_mode: str,
     evidence_keys: set[str] | None = None,
+    status_override: str | None = None,
 ) -> tuple[StockAIAnalysisContent, list[str]]:
     errors: list[str] = []
     payload = value
@@ -354,24 +518,33 @@ def normalize_ai_analysis_with_errors(
         payload = _parse_json_object(value)
         if payload is None:
             fallback = _plain_text_analysis(value, analysis_mode)
+            if status_override is not None:
+                fallback.overall_status = status_override
             return fallback, ["AI response was not a JSON object."]
     if not isinstance(payload, dict):
         fallback = _plain_text_analysis(str(value), analysis_mode)
+        if status_override is not None:
+            fallback.overall_status = status_override
         return fallback, ["AI response was not a JSON object."]
     if isinstance(payload.get("analysis"), dict):
         payload = payload["analysis"]
     payload = _normalize_analysis_keys(payload)
 
-    required = ("overall_status", "summary", "positive_points", "risk_points", "watch_points")
+    required = ("summary", "positive_points", "risk_points", "watch_points")
+    if status_override is None:
+        required = ("overall_status", *required)
     for key in required:
         if key not in payload:
             errors.append(f"Missing required field: {key}")
 
     allowed = _allowed_statuses(analysis_mode)
-    status = _clean_text(payload.get("overall_status"), _fallback_status(analysis_mode), 24)
-    if status not in allowed:
-        errors.append(f"Unsupported status for {analysis_mode}: {status}")
-        status = _fallback_status(analysis_mode)
+    if status_override is not None:
+        status = status_override if status_override in allowed else _fallback_status(analysis_mode)
+    else:
+        status = _clean_text(payload.get("overall_status"), _fallback_status(analysis_mode), 24)
+        if status not in allowed:
+            errors.append(f"Unsupported status for {analysis_mode}: {status}")
+            status = _fallback_status(analysis_mode)
 
     summary = _sanitize_grounded_text(
         payload.get("summary"),
@@ -420,7 +593,12 @@ def normalize_ai_analysis_with_errors(
     ), errors
 
 
-def _analysis_prompts(stock_summary: dict[str, Any], analysis_mode: str) -> AnalysisPrompts:
+def _analysis_prompts(
+    stock_summary: dict[str, Any],
+    analysis_mode: str,
+    *,
+    rule_status: str | None = None,
+) -> AnalysisPrompts:
     allowed = " / ".join(_allowed_statuses(analysis_mode))
     if analysis_mode == AI_MODE_UNHELD:
         objective = (
@@ -437,10 +615,23 @@ def _analysis_prompts(stock_summary: dict[str, Any], analysis_mode: str) -> Anal
     else:
         objective = "請整理現有資料並給出保守的觀察結論。"
 
+    status_instruction = (
+        f"本機規則已決定狀態為「{rule_status}」，你只能解釋原因，不得輸出、修改或質疑這個狀態。"
+        if rule_status is not None
+        else f"overall_status 只能是：{allowed}。"
+    )
+    output_instruction = (
+        "輸出鍵名必須完全使用 summary、positive_points、risk_points、watch_points，不得輸出 overall_status 或 disclaimer。"
+        if rule_status is not None
+        else (
+            "輸出鍵名必須完全使用 overall_status、summary、positive_points、risk_points、watch_points、disclaimer，"
+            "不得改名為 positives、risks、next_steps 或其他名稱。"
+        )
+    )
     system = (
         "你是台股資料解讀器，只能解讀輸入 JSON 中明確存在的資料。"
         f"{objective}"
-        f"overall_status 只能是：{allowed}。"
+        f"{status_instruction}"
         "持有股數是唯一禁用的個人部位資料，不得要求、推測或把未提供持有股數列為風險或觀察點。"
         "成交均價、每股損益、百分比損益、費後損益、公開財務資料、公開籌碼資料與市場指標都可以使用。"
         "若輸入沒有某項資料，可以在觀察點中保守提醒未來可補強該面向，但不得把未提供資料當成既定事實。"
@@ -454,8 +645,7 @@ def _analysis_prompts(stock_summary: dict[str, Any], analysis_mode: str) -> Anal
         "stock_summary.evidence 是唯一可引用的證據清單。summary、positive_points、risk_points、watch_points "
         "每一項都必須是 {\"text\": \"...\", \"evidence_keys\": [\"...\"]}，且 evidence_keys 只能使用 evidence 中存在的 key。"
         "每個非空結論至少綁定一個 evidence key；若沒有足夠證據，請降低結論強度並使用資料不足。"
-        "輸出鍵名必須完全使用 overall_status、summary、positive_points、risk_points、watch_points、disclaimer，"
-        "不得改名為 positives、risks、next_steps 或其他名稱。"
+        f"{output_instruction}"
         "positive_points、risk_points、watch_points 各最多三點。"
         "只輸出符合 JSON schema 的一個 JSON object，不要 Markdown、code fence、推理過程或額外說明。"
     )
@@ -466,6 +656,78 @@ def _analysis_prompts(stock_summary: dict[str, Any], analysis_mode: str) -> Anal
         f"stock_summary:\n{json.dumps(stock_summary, ensure_ascii=False, indent=2)}"
     )
     return AnalysisPrompts(system=system, user=user)
+
+
+def _batch_analysis_prompts(
+    stock_summaries: dict[str, dict[str, Any]],
+    rule_statuses: dict[str, str],
+) -> AnalysisPrompts:
+    mode_instructions = []
+    for mode in stock_summaries:
+        if mode == AI_MODE_HELD:
+            objective = "持有中：解釋持有理由、風險與重新檢視條件，不得要求或推測持有股數。"
+        else:
+            objective = "未持有：解釋新進場條件與風險，不得使用續抱、調節、賣出或未實現損益語意。"
+        mode_instructions.append(
+            f"{mode.lower()} 的本機規則狀態固定為「{rule_statuses[mode]}」。{objective}"
+        )
+    system = (
+        "你是台股資料解讀器。本機規則已完成決策，你只能根據輸入 evidence 解釋原因。"
+        "不得輸出或修改狀態，不得要求或推測持有股數。"
+        "成交均價、每股／百分比損益與所有公開市場指標可以使用，但只能出現在 held。"
+        "不得引用輸入不存在的外資、產品、支撐壓力或預測資訊。"
+        "EPS × 目前PE 是機械情境，不是目標價或必然漲跌空間。"
+        "延遲、過期、缺失或使用快取的資料只能作為限制說明，不得自行補造。"
+        "summary 與每個 point 都必須是 {\"text\":\"...\",\"evidence_keys\":[\"...\"]}，"
+        "evidence_keys 只能來自該模式的 evidence。每類 points 最多三項。"
+        "只輸出符合 schema 的 JSON，不要 Markdown、推理過程或其他文字。"
+        + " ".join(mode_instructions)
+    )
+    user = (
+        "請為 requested modes 各產生繁體中文解讀。輸出根物件只能包含 analyses。\n\n"
+        + json.dumps(
+            {
+                "requested_modes": [mode.lower() for mode in stock_summaries],
+                "rule_statuses": {mode.lower(): value for mode, value in rule_statuses.items()},
+                "stock_summaries": {mode.lower(): value for mode, value in stock_summaries.items()},
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return AnalysisPrompts(system=system, user=user)
+
+
+def _normalize_batch_provider_result(
+    raw_text: str,
+    stock_summaries: dict[str, dict[str, Any]],
+    rule_statuses: dict[str, str],
+    provider_metadata: dict[str, Any],
+) -> AIProviderBatchResult:
+    payload = _parse_json_object(raw_text)
+    analyses_payload = payload.get("analyses") if isinstance(payload, dict) else None
+    analyses: dict[str, AIProviderResult] = {}
+    for mode, summary in stock_summaries.items():
+        value = analyses_payload.get(mode.lower()) if isinstance(analyses_payload, dict) else None
+        analysis, errors = normalize_ai_analysis_with_errors(
+            value,
+            mode,
+            evidence_keys=extract_evidence_keys(summary),
+            status_override=rule_statuses[mode],
+        )
+        analyses[mode] = AIProviderResult(
+            analysis=analysis,
+            raw_response_text=raw_text,
+            provider_metadata={**provider_metadata, "batch_mode": mode.lower()},
+            validation_errors=errors,
+            quality_flags=quality_flags_from_validation_errors(errors),
+            grounding_errors=grounding_errors_from_validation_errors(errors),
+        )
+    return AIProviderBatchResult(
+        analyses=analyses,
+        raw_response_text=raw_text,
+        provider_metadata=provider_metadata,
+    )
 
 
 def _allowed_statuses(analysis_mode: str) -> tuple[str, ...]:
@@ -502,7 +764,7 @@ def _raise_for_provider_error(response: requests.Response, provider_name: str) -
             message = f"{message} 免費模型或供應商目前達到速率限制，請稍後重試或切換模型。"
         elif response.status_code in {500, 502, 503, 504}:
             message = f"{message} 模型供應商暫時不可用，請稍後重試；若已有快取，系統會保留最近成功分析。"
-        raise AIAnalysisError(message) from exc
+        raise AIAnalysisError(message, status_code=response.status_code) from exc
 
 
 def _openrouter_requires_relaxed_routing(response: requests.Response) -> bool:

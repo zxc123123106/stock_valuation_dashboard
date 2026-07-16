@@ -150,6 +150,7 @@ def ensure_ai_analysis_log_columns() -> None:
                 "validation_errors_json": "TEXT",
                 "quality_flags_json": "TEXT",
                 "grounding_errors_json": "TEXT",
+                "run_id": "INTEGER REFERENCES stock_ai_analysis_runs(id) ON DELETE SET NULL",
             },
         )
         connection.execute(
@@ -175,6 +176,7 @@ def _remove_legacy_ai_analysis_unique_constraint(connection) -> None:
         {
             "quality_flags_json": "TEXT",
             "grounding_errors_json": "TEXT",
+            "run_id": "INTEGER",
         },
     )
     connection.execute(text("DROP TABLE IF EXISTS stock_ai_analyses_v2"))
@@ -184,6 +186,7 @@ def _remove_legacy_ai_analysis_unique_constraint(connection) -> None:
             CREATE TABLE stock_ai_analyses_v2 (
                 id INTEGER NOT NULL PRIMARY KEY,
                 stock_id INTEGER NOT NULL,
+                run_id INTEGER,
                 provider VARCHAR(24) NOT NULL,
                 model VARCHAR(120) NOT NULL,
                 analysis_mode VARCHAR(16) NOT NULL DEFAULT 'GENERAL',
@@ -201,7 +204,8 @@ def _remove_legacy_ai_analysis_unique_constraint(connection) -> None:
                 error_message VARCHAR(500),
                 created_at DATETIME NOT NULL,
                 updated_at DATETIME NOT NULL,
-                FOREIGN KEY(stock_id) REFERENCES stocks (id)
+                FOREIGN KEY(stock_id) REFERENCES stocks (id) ON DELETE CASCADE,
+                FOREIGN KEY(run_id) REFERENCES stock_ai_analysis_runs (id) ON DELETE SET NULL
             )
             """
         )
@@ -210,14 +214,14 @@ def _remove_legacy_ai_analysis_unique_constraint(connection) -> None:
         text(
             """
             INSERT INTO stock_ai_analyses_v2 (
-                id, stock_id, provider, model, analysis_mode, prompt_version,
+                id, stock_id, run_id, provider, model, analysis_mode, prompt_version,
                 analysis_date, input_hash, request_payload_json, response_json,
                 raw_response_text, provider_metadata_json, validation_errors_json,
                 quality_flags_json, grounding_errors_json,
                 status, error_message, created_at, updated_at
             )
             SELECT
-                id, stock_id, provider, model, analysis_mode, prompt_version,
+                id, stock_id, run_id, provider, model, analysis_mode, prompt_version,
                 analysis_date, input_hash, request_payload_json, response_json,
                 raw_response_text, provider_metadata_json, validation_errors_json,
                 quality_flags_json, grounding_errors_json,
@@ -229,6 +233,7 @@ def _remove_legacy_ai_analysis_unique_constraint(connection) -> None:
     connection.execute(text("DROP TABLE stock_ai_analyses"))
     connection.execute(text("ALTER TABLE stock_ai_analyses_v2 RENAME TO stock_ai_analyses"))
     connection.execute(text("CREATE INDEX ix_stock_ai_analyses_stock_id ON stock_ai_analyses (stock_id)"))
+    connection.execute(text("CREATE INDEX ix_stock_ai_analyses_run_id ON stock_ai_analyses (run_id)"))
     connection.execute(text("CREATE INDEX ix_stock_ai_analyses_provider ON stock_ai_analyses (provider)"))
     connection.execute(text("CREATE INDEX ix_stock_ai_analyses_analysis_mode ON stock_ai_analyses (analysis_mode)"))
     connection.execute(text("CREATE INDEX ix_stock_ai_analyses_analysis_date ON stock_ai_analyses (analysis_date)"))
