@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 from decimal import Decimal
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from backend.app.providers.market_data_legacy import (
+    QuoteSnapshot,
     StockProfileSnapshot,
     _fetch_twse_mis_quote,
     _parse_financial_quarters,
     _parse_finmind_eps,
     _parse_monthly_revenues,
     _parse_pe_history,
+    _require_current_market_quote,
     derive_pe,
     fetch_financial_bundle,
     fetch_stock_quote,
@@ -114,6 +118,26 @@ class StockProfileTest(unittest.TestCase):
 
 
 class TwseMisQuoteParserTest(unittest.TestCase):
+    def test_rejects_prior_date_quote_during_active_market_session(self) -> None:
+        taipei = ZoneInfo("Asia/Taipei")
+        quote = QuoteSnapshot(
+            symbol="0050",
+            open_price=Decimal("105.00"),
+            previous_close=Decimal("106.00"),
+            day_high=Decimal("106.00"),
+            day_low=Decimal("104.50"),
+            current_price=Decimal("105.50"),
+            change_percent=Decimal("0.48"),
+            price_updated_at=datetime(2026, 7, 15, 13, 30, tzinfo=taipei),
+            source="test quote",
+        )
+
+        with self.assertRaisesRegex(ValueError, "stale quote date 2026-07-15"):
+            _require_current_market_quote(
+                quote,
+                now=datetime(2026, 7, 16, 10, 33, tzinfo=taipei),
+            )
+
     def test_fetch_twse_mis_quote_parses_realtime_fields(self) -> None:
         import backend.app.providers.market_data_legacy as market_data
 

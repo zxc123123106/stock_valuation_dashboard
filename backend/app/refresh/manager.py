@@ -33,6 +33,7 @@ from ..db.apply import (
     next_display_order,
 )
 from ..db.bootstrap import cleanup_crawler_logs_if_due
+from ..services.database_backup_service import ensure_daily_backup
 from ..services.market_data_service import (
     derive_pe,
     fetch_daily_prices,
@@ -58,6 +59,7 @@ from .models import (
     CHANNEL_HISTORY,
     CHANNEL_QUOTE,
     CLOSE_VERIFICATION_JOB_NAME,
+    DEFAULT_CHANNEL_TIMEOUT_SECONDS,
     FUNDAMENTAL_REFRESH_TIME,
     HISTORY_REFRESH_TIME,
     MARKET_CLOSE_TIME,
@@ -105,6 +107,7 @@ class BackgroundRefreshManager:
         pe_poll_interval_seconds: int = 900,
         monthly_revenue_release_interval_seconds: int = 7200,
         futures_refresh_seconds: int = 10,
+        channel_timeout_seconds: dict[str, float] | None = None,
     ) -> None:
         self.interval_seconds = interval_seconds
         self.quote_market_interval_seconds = quote_market_interval_seconds or interval_seconds
@@ -112,6 +115,10 @@ class BackgroundRefreshManager:
         self.pe_poll_interval_seconds = pe_poll_interval_seconds
         self.monthly_revenue_release_interval_seconds = monthly_revenue_release_interval_seconds
         self.futures_refresh_seconds = futures_refresh_seconds
+        self.channel_timeout_seconds = {
+            **DEFAULT_CHANNEL_TIMEOUT_SECONDS,
+            **(channel_timeout_seconds or {}),
+        }
         self.finmind_token = finmind_token
         self._queues: dict[str, asyncio.PriorityQueue] = {}
         self._pending_jobs: dict[tuple[str, str], RefreshJob] = {}
@@ -157,6 +164,7 @@ class BackgroundRefreshManager:
             )
         self._tasks.append(asyncio.create_task(self._run_scheduler(), name="stock-refresh-scheduler"))
         self._tasks.append(asyncio.create_task(self._run_futures_ticker(), name="wtx-futures-refresh-ticker"))
+        self._tasks.append(asyncio.create_task(self._run_database_backup_ticker(), name="database-backup-ticker"))
 
     async def stop(self) -> None:
         if self._stop_event:
@@ -166,6 +174,15 @@ class BackgroundRefreshManager:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
+
+    async def _run_database_backup_ticker(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await asyncio.to_thread(ensure_daily_backup)
+            except Exception:
+                # Backup failures must not stop market-data refresh tasks.
+                continue
 
     async def queue_symbol(
         self,
@@ -401,6 +418,10 @@ class BackgroundRefreshManager:
                     state.message = f"Refreshing {channel.lower()} data."
                     self._states[job.symbol] = state
                 await self._execute_job(job)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._recover_unexpected_job_failure(job, exc)
             finally:
                 queue.task_done()
 
@@ -418,15 +439,22 @@ class BackgroundRefreshManager:
 
         payload: dict = {"results": {}, "errors": {}}
         try:
-            if semaphore:
-                async with semaphore:
-                    payload = await asyncio.to_thread(
-                        _fetch_channel_payload,
-                        job,
-                        self.finmind_token,
-                    )
-            else:
-                payload = await asyncio.to_thread(_fetch_channel_payload, job, self.finmind_token)
+            fetch_coro = asyncio.to_thread(
+                _fetch_channel_payload,
+                job,
+                self.finmind_token,
+            )
+            timeout_seconds = self.channel_timeout_seconds[job.channel]
+            try:
+                if semaphore:
+                    async with semaphore:
+                        payload = await asyncio.wait_for(fetch_coro, timeout=timeout_seconds)
+                else:
+                    payload = await asyncio.wait_for(fetch_coro, timeout=timeout_seconds)
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"{job.channel} refresh timed out after {timeout_seconds:g} seconds."
+                ) from exc
 
             async with self._db_write_lock:
                 await asyncio.to_thread(_apply_channel_payload, job, payload, started_at)
@@ -451,66 +479,137 @@ class BackgroundRefreshManager:
             else:
                 await asyncio.to_thread(_record_refresh_success, job.symbol, message, started_at, finished_at)
 
-        follow_up = None
-        async with self._lock:
-            key = (job.channel, job.symbol)
-            self._running_jobs.pop(key, None)
-            runtime = self._channel_runtime[job.channel]
-            runtime.current_symbols.discard(job.symbol)
-            runtime.last_finished_at = finished_at
-            self._last_refresh_finished_at = finished_at
-            if job.symbol not in self._deleted_symbols:
-                self._states[job.symbol] = RefreshSymbolState(
-                    symbol=job.symbol,
-                    status="failed" if job.channel == CHANNEL_QUOTE and failed_categories else "success",
-                    message=message,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                )
-                follow_up = self._follow_up_jobs.pop(key, None)
+        follow_up = await self._finish_running_job(
+            job,
+            status="failed" if job.channel == CHANNEL_QUOTE and failed_categories else "success",
+            message=message,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
         if follow_up:
             await self._enqueue_job(follow_up)
         if job.channel == CHANNEL_QUOTE and job.profile_required and not failed_categories:
             await self._queue_all_channels(job.symbol, priority=PRIORITY_MANUAL, force=True)
+
+    async def _recover_unexpected_job_failure(self, job: RefreshJob, error: Exception) -> None:
+        key = (job.channel, job.symbol)
+        async with self._lock:
+            state = self._states.get(job.symbol)
+            started_at = state.started_at if state and state.started_at else datetime.now(UTC)
+            still_running = key in self._running_jobs
+        if not still_running:
+            return
+
+        finished_at = datetime.now(UTC)
+        try:
+            async with self._db_write_lock:
+                await asyncio.to_thread(
+                    _record_job_errors,
+                    job,
+                    {category: error for category in job.categories},
+                    started_at,
+                )
+                if job.channel == CHANNEL_QUOTE:
+                    await asyncio.to_thread(
+                        _record_refresh_failed,
+                        job.symbol,
+                        str(error),
+                        started_at,
+                        finished_at,
+                    )
+        except Exception:
+            # Runtime cleanup must still happen when SQLite error reporting
+            # itself fails; otherwise the symbol remains stuck forever.
+            pass
+
+        message = f"{job.channel} refresh failed unexpectedly: {error}"
+        follow_up = await self._finish_running_job(
+            job,
+            status="failed",
+            message=message,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+        if follow_up and not (self._stop_event and self._stop_event.is_set()):
+            await self._enqueue_job(follow_up)
+
+    async def _finish_running_job(
+        self,
+        job: RefreshJob,
+        *,
+        status: str,
+        message: str,
+        started_at: datetime,
+        finished_at: datetime,
+    ) -> RefreshJob | None:
+        async with self._lock:
+            key = (job.channel, job.symbol)
+            if self._running_jobs.pop(key, None) is None:
+                return None
+            runtime = self._channel_runtime[job.channel]
+            runtime.current_symbols.discard(job.symbol)
+            runtime.last_finished_at = finished_at
+            self._last_refresh_finished_at = finished_at
+            if job.symbol in self._deleted_symbols:
+                self._follow_up_jobs.pop(key, None)
+                return None
+            self._states[job.symbol] = RefreshSymbolState(
+                symbol=job.symbol,
+                status=status,
+                message=message,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            return self._follow_up_jobs.pop(key, None)
 
     async def _run_scheduler(self) -> None:
         if not self._stop_event:
             return
         while True:
             now = datetime.now(UTC)
-            if self._next_quote_at is None or now >= self._next_quote_at:
-                symbols = await asyncio.to_thread(_active_symbols)
-                for symbol in symbols:
-                    await self._enqueue_job(
-                        RefreshJob(symbol, CHANNEL_QUOTE, frozenset(("QUOTE",)), PRIORITY_AUTO)
-                    )
-                interval = (
-                    self.quote_market_interval_seconds
-                    if _stock_market_is_open(now)
-                    else self.quote_off_hours_interval_seconds
-                )
-                self._next_quote_at = now + timedelta(seconds=interval)
-                self._channel_runtime[CHANNEL_QUOTE].next_run_at = self._next_quote_at
-
-            if self._next_schedule_scan_at is None or now >= self._next_schedule_scan_at:
-                scheduled = await asyncio.to_thread(
-                    _scheduled_jobs_for_all,
-                    now,
-                    self.pe_poll_interval_seconds,
-                    self.monthly_revenue_release_interval_seconds,
-                )
-                for symbol, channel, categories, is_retry in scheduled:
-                    await self._enqueue_job(
-                        RefreshJob(
-                            symbol,
-                            channel,
-                            frozenset(categories),
-                            PRIORITY_RETRY if is_retry else PRIORITY_AUTO,
+            try:
+                if self._next_quote_at is None or now >= self._next_quote_at:
+                    symbols = await asyncio.to_thread(_active_symbols)
+                    for symbol in symbols:
+                        await self._enqueue_job(
+                            RefreshJob(symbol, CHANNEL_QUOTE, frozenset(("QUOTE",)), PRIORITY_AUTO)
                         )
+                    interval = (
+                        self.quote_market_interval_seconds
+                        if _stock_market_is_open(now)
+                        else self.quote_off_hours_interval_seconds
                     )
-                self._next_schedule_scan_at = now + timedelta(minutes=1)
-                for channel in (CHANNEL_FUNDAMENTALS, CHANNEL_BROKER, CHANNEL_HISTORY):
-                    self._channel_runtime[channel].next_run_at = self._next_schedule_scan_at
+                    self._next_quote_at = now + timedelta(seconds=interval)
+                    self._channel_runtime[CHANNEL_QUOTE].next_run_at = self._next_quote_at
+
+                if self._next_schedule_scan_at is None or now >= self._next_schedule_scan_at:
+                    scheduled = await asyncio.to_thread(
+                        _scheduled_jobs_for_all,
+                        now,
+                        self.pe_poll_interval_seconds,
+                        self.monthly_revenue_release_interval_seconds,
+                    )
+                    for symbol, channel, categories, is_retry in scheduled:
+                        await self._enqueue_job(
+                            RefreshJob(
+                                symbol,
+                                channel,
+                                frozenset(categories),
+                                PRIORITY_RETRY if is_retry else PRIORITY_AUTO,
+                            )
+                        )
+                    self._next_schedule_scan_at = now + timedelta(minutes=1)
+                    for channel in (CHANNEL_FUNDAMENTALS, CHANNEL_BROKER, CHANNEL_HISTORY):
+                        self._channel_runtime[channel].next_run_at = self._next_schedule_scan_at
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                retry_at = datetime.now(UTC) + timedelta(seconds=SCHEDULER_TICK_SECONDS)
+                if self._next_quote_at is None or self._next_quote_at <= now:
+                    self._next_quote_at = retry_at
+                    self._channel_runtime[CHANNEL_QUOTE].next_run_at = retry_at
+                if self._next_schedule_scan_at is None or self._next_schedule_scan_at <= now:
+                    self._next_schedule_scan_at = retry_at
 
             next_times = [value for value in (self._next_quote_at, self._next_schedule_scan_at) if value]
             next_auto = min(next_times) if next_times else now + timedelta(seconds=SCHEDULER_TICK_SECONDS)

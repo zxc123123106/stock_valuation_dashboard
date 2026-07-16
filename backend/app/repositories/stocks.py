@@ -8,24 +8,7 @@ from decimal import Decimal
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from ..db.models import (
-    CrawlerLog,
-    Stock,
-    StockAIAnalysis,
-    StockAIFeedback,
-    StockBrokerTrading,
-    StockBrokerTradingRow,
-    StockDailyPrice,
-    StockDataQualityState,
-    StockEPS,
-    StockFinancialQuarter,
-    StockMetric,
-    StockMonthlyRevenue,
-    StockPEHistory,
-    StockPosition,
-    StockRefreshState,
-    StockValuation,
-)
+from ..db.models import CrawlerLog, Stock, StockPosition, StockRefreshState, StockValuation
 
 
 def list_active(session: Session) -> list[Stock]:
@@ -94,27 +77,6 @@ def get_position(session: Session, stock_id: int) -> StockPosition | None:
 
 
 def hard_delete(session: Session, stock: Stock) -> None:
-    broker = session.scalar(select(StockBrokerTrading).where(StockBrokerTrading.stock_id == stock.id))
-    if broker is not None:
-        session.execute(
-            delete(StockBrokerTradingRow).where(StockBrokerTradingRow.broker_trading_id == broker.id)
-        )
-        session.delete(broker)
-
-    for model in (
-        StockPosition,
-        StockMetric,
-        StockEPS,
-        StockValuation,
-        StockDailyPrice,
-        StockPEHistory,
-        StockMonthlyRevenue,
-        StockFinancialQuarter,
-        StockAIFeedback,
-        StockAIAnalysis,
-        StockDataQualityState,
-    ):
-        session.execute(delete(model).where(model.stock_id == stock.id))
     session.execute(delete(StockRefreshState).where(StockRefreshState.symbol == stock.symbol))
     session.execute(
         delete(CrawlerLog).where(

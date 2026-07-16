@@ -1,10 +1,11 @@
-import React from "react";
+import React, { useState } from "react";
 
 import { FuturesTrackerCard } from "./components/futures/FuturesWidget";
 import { DashboardHeader } from "./components/dashboard/DashboardHeader";
 import { DashboardSummary } from "./components/dashboard/DashboardSummary";
 import { DashboardToolbar } from "./components/dashboard/DashboardToolbar";
 import { StockList } from "./components/stocks/StockList";
+import { DataManagementPanel } from "./components/dataManagement/DataManagementPanel";
 import { useDashboardData } from "./hooks/useDashboardData";
 import { useStockActions } from "./hooks/useStockActions";
 import { useStockSorting } from "./hooks/useStockSorting";
@@ -12,6 +13,7 @@ import { AlertCircle } from "lucide-react";
 
 const POLL_SECONDS = 5;
 export default function App() {
+  const [dataManagementOpen, setDataManagementOpen] = useState(false);
   const {
     stocks,
     futuresData,
@@ -70,6 +72,14 @@ export default function App() {
         brokerSetting={brokerSetting}
         onBrokerChange={updateBroker}
         onSubmit={queueRefreshSymbol}
+        onOpenDataManagement={() => setDataManagementOpen(true)}
+      />
+
+      <DataManagementPanel
+        open={dataManagementOpen}
+        onClose={() => setDataManagementOpen(false)}
+        onMessage={setMessage}
+        onError={setError}
       />
 
       {error && (
@@ -108,7 +118,6 @@ export default function App() {
   );
 
 }
-
 
 
 

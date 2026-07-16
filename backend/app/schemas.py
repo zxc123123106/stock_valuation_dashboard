@@ -2,6 +2,7 @@
 
 from .schema.ai import *
 from .schema.dashboard import *
+from .schema.data_management import *
 from .schema.fundamental import *
 from .schema.futures import *
 from .schema.quality import *

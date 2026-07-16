@@ -165,12 +165,14 @@ def fetch_stock_quote(
 
     if finmind_token:
         try:
-            return _fetch_finmind_realtime_quote(normalized_symbol, finmind_token)
+            quote = _fetch_finmind_realtime_quote(normalized_symbol, finmind_token)
+            return _require_current_market_quote(quote)
         except Exception as exc:
             failures.append(f"FinMind realtime snapshot failed: {exc}")
 
     try:
-        return _fetch_twse_mis_quote(normalized_symbol, profile.market)
+        quote = _fetch_twse_mis_quote(normalized_symbol, profile.market)
+        return _require_current_market_quote(quote)
     except Exception as exc:
         failures.append(f"TWSE MIS quote failed: {exc}")
 
@@ -883,6 +885,19 @@ def _taiwan_market_is_open(now: datetime | None = None) -> bool:
     return local_now.weekday() < 5 and clock_time(9, 0) <= local_time < clock_time(14, 0)
 
 
+def _require_current_market_quote(quote: QuoteSnapshot, now: datetime | None = None) -> QuoteSnapshot:
+    local_now = (now or datetime.now(TAIPEI_TZ)).astimezone(TAIPEI_TZ)
+    if not _taiwan_market_is_open(local_now):
+        return quote
+    quote_date = quote.price_updated_at.astimezone(TAIPEI_TZ).date()
+    if quote_date != local_now.date():
+        raise ValueError(
+            f"{quote.source} returned stale quote date {quote_date.isoformat()} "
+            f"during the {local_now.date().isoformat()} market session."
+        )
+    return quote
+
+
 def _previous_close_from_change(current_price: Decimal, change_price: Decimal | None) -> Decimal | None:
     if change_price is None:
         return None
@@ -891,7 +906,7 @@ def _previous_close_from_change(current_price: Decimal, change_price: Decimal | 
 
 def _parse_datetime(value) -> datetime:
     if not value:
-        return datetime.now(TAIPEI_TZ)
+        raise ValueError("Realtime quote did not include an update timestamp.")
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=TAIPEI_TZ)
@@ -901,11 +916,11 @@ def _parse_datetime(value) -> datetime:
 def _parse_twse_mis_datetime(date_value, time_value) -> datetime:
     try:
         raw_date = str(date_value)
-        raw_time = str(time_value or "00:00:00")
+        raw_time = str(time_value)
         parsed = datetime.strptime(f"{raw_date} {raw_time}", "%Y%m%d %H:%M:%S")
         return parsed.replace(tzinfo=TAIPEI_TZ)
-    except (TypeError, ValueError):
-        return datetime.now(TAIPEI_TZ)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("TWSE MIS quote did not include a valid update timestamp.") from exc
 
 
 def _parse_twse_report_date(value) -> date | None:

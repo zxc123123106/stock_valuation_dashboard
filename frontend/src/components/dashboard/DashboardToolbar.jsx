@@ -1,8 +1,8 @@
 import React from "react";
-import { ChevronDown, Plus, Search } from "lucide-react";
+import { ChevronDown, DatabaseBackup, Plus, Search } from "lucide-react";
 
 
-export function DashboardToolbar({ symbol, onSymbolChange, brokerSetting, onBrokerChange, onSubmit }) {
+export function DashboardToolbar({ symbol, onSymbolChange, brokerSetting, onBrokerChange, onSubmit, onOpenDataManagement }) {
   return (
     <form className="toolbar" aria-label="stock controls" onSubmit={(event) => {
       event.preventDefault();
@@ -34,6 +34,15 @@ export function DashboardToolbar({ symbol, onSymbolChange, brokerSetting, onBrok
         </select>
         <ChevronDown className="broker-select-icon" size={17} aria-hidden="true" />
       </label>
+      <button
+        className="icon-button data-management-button"
+        type="button"
+        onClick={onOpenDataManagement}
+        title="資料管理"
+        aria-label="開啟資料管理"
+      >
+        <DatabaseBackup size={19} />
+      </button>
     </form>
   );
 }

@@ -257,7 +257,12 @@ def freshness_for_state(
         if fetched_at is None:
             return "MISSING"
         is_market_open = local_now.weekday() < 5 and MARKET_OPEN_TIME <= local_now.time() < MARKET_CLOSE_TIME
-        if is_market_open and state.data_date == local_now.date():
+        if is_market_open:
+            # During the live session, a prior trading day's quote is never
+            # current even if the official daily-price table has not published
+            # today's row yet.
+            if state.data_date != local_now.date():
+                return "STALE"
             age = as_utc(now) - fetched_at
             if age <= timedelta(minutes=2):
                 return "REALTIME"

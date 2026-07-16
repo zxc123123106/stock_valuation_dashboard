@@ -22,24 +22,25 @@ class Stock(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
-    metrics: Mapped[list["StockMetric"]] = relationship(back_populates="stock")
-    eps_rows: Mapped[list["StockEPS"]] = relationship(back_populates="stock")
-    valuations: Mapped[list["StockValuation"]] = relationship(back_populates="stock")
-    position: Mapped["StockPosition | None"] = relationship(back_populates="stock", uselist=False)
-    broker_trading: Mapped["StockBrokerTrading | None"] = relationship(back_populates="stock", uselist=False)
-    daily_prices: Mapped[list["StockDailyPrice"]] = relationship(back_populates="stock")
-    pe_history: Mapped[list["StockPEHistory"]] = relationship(back_populates="stock")
-    monthly_revenues: Mapped[list["StockMonthlyRevenue"]] = relationship(back_populates="stock")
-    financial_quarters: Mapped[list["StockFinancialQuarter"]] = relationship(back_populates="stock")
-    ai_analyses: Mapped[list["StockAIAnalysis"]] = relationship(back_populates="stock")
-    data_quality_states: Mapped[list["StockDataQualityState"]] = relationship(back_populates="stock")
+    metrics: Mapped[list["StockMetric"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
+    eps_rows: Mapped[list["StockEPS"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
+    valuations: Mapped[list["StockValuation"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
+    position: Mapped["StockPosition | None"] = relationship(back_populates="stock", uselist=False, cascade="all, delete-orphan", passive_deletes=True)
+    broker_trading: Mapped["StockBrokerTrading | None"] = relationship(back_populates="stock", uselist=False, cascade="all, delete-orphan", passive_deletes=True)
+    daily_prices: Mapped[list["StockDailyPrice"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
+    pe_history: Mapped[list["StockPEHistory"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
+    monthly_revenues: Mapped[list["StockMonthlyRevenue"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
+    financial_quarters: Mapped[list["StockFinancialQuarter"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
+    institutional_trading: Mapped[list["StockInstitutionalTrading"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
+    ai_analyses: Mapped[list["StockAIAnalysis"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
+    data_quality_states: Mapped[list["StockDataQualityState"]] = relationship(back_populates="stock", cascade="all, delete-orphan", passive_deletes=True)
 
 
 class StockMetric(Base):
     __tablename__ = "stock_metrics"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
     open_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     previous_close: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     day_high: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
@@ -66,7 +67,7 @@ class StockEPS(Base):
     __table_args__ = (UniqueConstraint("stock_id", "eps_type", name="uq_stock_eps_type"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
     eps_type: Mapped[str] = mapped_column(String(24))
     eps_value: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     eps_period: Mapped[str] = mapped_column(String(80))
@@ -83,7 +84,7 @@ class StockValuation(Base):
     __table_args__ = (UniqueConstraint("stock_id", "eps_type", name="uq_stock_valuation_eps_type"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
     eps_type: Mapped[str] = mapped_column(String(24))
     current_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     current_pe: Mapped[Decimal] = mapped_column(Numeric(12, 2))
@@ -105,7 +106,7 @@ class StockPosition(Base):
     __table_args__ = (UniqueConstraint("stock_id", name="uq_stock_position_stock_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
     buy_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
@@ -118,7 +119,7 @@ class StockBrokerTrading(Base):
     __table_args__ = (UniqueConstraint("stock_id", name="uq_stock_broker_trading_stock_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
     trade_date: Mapped[str] = mapped_column(String(20))
     main_net_volume: Mapped[int] = mapped_column(Integer)
     main_buy_volume: Mapped[int] = mapped_column(Integer)
@@ -130,7 +131,7 @@ class StockBrokerTrading(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     stock: Mapped[Stock] = relationship(back_populates="broker_trading")
-    rows: Mapped[list["StockBrokerTradingRow"]] = relationship(back_populates="broker_trading")
+    rows: Mapped[list["StockBrokerTradingRow"]] = relationship(back_populates="broker_trading", cascade="all, delete-orphan", passive_deletes=True)
 
 
 class StockBrokerTradingRow(Base):
@@ -138,7 +139,7 @@ class StockBrokerTradingRow(Base):
     __table_args__ = (UniqueConstraint("broker_trading_id", "side", "rank", name="uq_broker_trading_row_rank"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    broker_trading_id: Mapped[int] = mapped_column(ForeignKey("stock_broker_trading.id"), index=True)
+    broker_trading_id: Mapped[int] = mapped_column(ForeignKey("stock_broker_trading.id", ondelete="CASCADE"), index=True)
     side: Mapped[str] = mapped_column(String(8))
     rank: Mapped[int] = mapped_column(Integer)
     broker_name: Mapped[str] = mapped_column(String(80))
@@ -156,7 +157,7 @@ class StockDailyPrice(Base):
     __table_args__ = (UniqueConstraint("stock_id", "trade_date", name="uq_stock_daily_price_date"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
     trade_date: Mapped[date] = mapped_column(Date, index=True)
     open_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     high_price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
@@ -176,7 +177,7 @@ class StockPEHistory(Base):
     __table_args__ = (UniqueConstraint("stock_id", "trade_date", name="uq_stock_pe_history_date"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
     trade_date: Mapped[date] = mapped_column(Date, index=True)
     per: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     pbr: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
@@ -194,7 +195,7 @@ class StockMonthlyRevenue(Base):
     __table_args__ = (UniqueConstraint("stock_id", "month_date", name="uq_stock_monthly_revenue_date"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
     month_date: Mapped[date] = mapped_column(Date, index=True)
     revenue: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     mom_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
@@ -212,7 +213,7 @@ class StockFinancialQuarter(Base):
     __table_args__ = (UniqueConstraint("stock_id", "quarter_date", name="uq_stock_financial_quarter_date"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
     quarter_date: Mapped[date] = mapped_column(Date, index=True)
     eps: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     revenue: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
@@ -225,6 +226,25 @@ class StockFinancialQuarter(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     stock: Mapped[Stock] = relationship(back_populates="financial_quarters")
+
+
+class StockInstitutionalTrading(Base):
+    __tablename__ = "stock_institutional_trading"
+    __table_args__ = (UniqueConstraint("stock_id", "trade_date", name="uq_stock_institutional_trading_date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    foreign_net: Mapped[int] = mapped_column(Integer)
+    investment_trust_net: Mapped[int] = mapped_column(Integer)
+    dealer_net: Mapped[int] = mapped_column(Integer)
+    total_net: Mapped[int] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(120))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    stock: Mapped[Stock] = relationship(back_populates="institutional_trading")
 
 
 class CrawlerLog(Base):
@@ -261,7 +281,7 @@ class StockDataQualityState(Base):
     __table_args__ = (UniqueConstraint("stock_id", "category", name="uq_stock_data_quality_category"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
     category: Mapped[str] = mapped_column(String(32), index=True)
     data_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     data_period: Mapped[str | None] = mapped_column(String(80), nullable=True)
@@ -286,7 +306,7 @@ class StockAIAnalysis(Base):
     __tablename__ = "stock_ai_analyses"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
     provider: Mapped[str] = mapped_column(String(24), index=True)
     model: Mapped[str] = mapped_column(String(120))
     analysis_mode: Mapped[str] = mapped_column(String(16), default="GENERAL", index=True)
@@ -313,8 +333,8 @@ class StockAIFeedback(Base):
     __table_args__ = (UniqueConstraint("analysis_id", name="uq_stock_ai_feedback_analysis"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    analysis_id: Mapped[int] = mapped_column(ForeignKey("stock_ai_analyses.id"), index=True)
-    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id"), index=True)
+    analysis_id: Mapped[int] = mapped_column(ForeignKey("stock_ai_analyses.id", ondelete="CASCADE"), index=True)
+    stock_id: Mapped[int] = mapped_column(ForeignKey("stocks.id", ondelete="CASCADE"), index=True)
     symbol: Mapped[str] = mapped_column(String(24), index=True)
     analysis_mode: Mapped[str] = mapped_column(String(16), index=True)
     rating: Mapped[str] = mapped_column(String(24), index=True)

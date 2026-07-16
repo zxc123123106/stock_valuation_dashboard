@@ -6,6 +6,8 @@ export const queryKeys = {
   fundamentalTrends: (symbol, fetchedAt) => ["stocks", symbol, "fundamental-trends", fetchedAt || "pending"],
   technicalAnalysis: (symbol, updatedAt) => ["stocks", symbol, "technical-analysis", updatedAt || "pending"],
   aiAnalysis: (symbol) => ["stocks", symbol, "ai-analysis"],
+  dataManagementStatus: ["data-management", "status"],
+  databaseBackups: ["data-management", "backups"],
 };
 
 

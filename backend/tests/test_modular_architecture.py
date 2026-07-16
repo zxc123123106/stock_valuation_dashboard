@@ -31,6 +31,8 @@ class RouterContractTest(unittest.TestCase):
             ("GET", "/api/refresh/status"),
             ("GET", "/api/futures/wtx"),
             ("POST", "/api/stocks/{symbol}/ai-analysis"),
+            ("GET", "/api/data-management/status"),
+            ("POST", "/api/data-management/import"),
         }
         self.assertTrue(expected.issubset(routes))
 

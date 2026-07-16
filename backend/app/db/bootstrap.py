@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 from ..brokers import DEFAULT_BROKER_ID
 from ..config import get_settings
 from ..valuation import difference_percent, estimate_price, valuation_status
-from .apply import backfill_latest_metric_pe_from_history
+from .apply import backfill_latest_metric_pe_from_history, next_display_order
+from .migrations import run_schema_migrations
 from .models import *
 from .session import Base, SessionLocal, engine
 
@@ -21,12 +22,7 @@ TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 CRAWLER_LOG_CLEANUP_KEY = "crawler_logs_last_cleanup_at"
 
 def init_database() -> None:
-    Base.metadata.create_all(engine)
-    ensure_stock_display_order_column()
-    ensure_stock_asset_type_column()
-    ensure_stock_metric_quote_columns()
-    ensure_analysis_cache_columns()
-    ensure_ai_analysis_log_columns()
+    run_schema_migrations(_prepare_legacy_database)
     with SessionLocal() as session:
         backfill_display_order(session)
         remove_unsupported_eps(session)
@@ -39,6 +35,15 @@ def init_database() -> None:
 
     backfill_data_quality_states()
     run_startup_maintenance()
+
+
+def _prepare_legacy_database() -> None:
+    Base.metadata.create_all(engine)
+    ensure_stock_display_order_column()
+    ensure_stock_asset_type_column()
+    ensure_stock_metric_quote_columns()
+    ensure_analysis_cache_columns()
+    ensure_ai_analysis_log_columns()
 
 
 def ensure_stock_display_order_column() -> None:
@@ -427,8 +432,11 @@ def remove_legacy_histock_eps(session: Session) -> None:
 
 
 def run_startup_maintenance() -> None:
+    from ..services.database_backup_service import ensure_daily_backup
+
     reset_interrupted_refresh_states()
     cleanup_crawler_logs_if_due()
+    ensure_daily_backup()
 
 
 def reset_interrupted_refresh_states() -> None:

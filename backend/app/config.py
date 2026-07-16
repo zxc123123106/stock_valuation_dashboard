@@ -57,6 +57,9 @@ class Settings:
     futures_refresh_seconds: int
     crawler_log_retention_days: int
     crawler_log_cleanup_interval_hours: int
+    database_backup_dir: str
+    database_backup_retention_count: int
+    database_backup_hour: int
     api_version: str = "0.1.0"
 
 
@@ -137,5 +140,14 @@ def get_settings() -> Settings:
         crawler_log_cleanup_interval_hours=_parse_positive_int(
             os.getenv("CRAWLER_LOG_CLEANUP_INTERVAL_HOURS", "24"),
             24,
+        ),
+        database_backup_dir=os.getenv("DATABASE_BACKUP_DIR", "./data/backups"),
+        database_backup_retention_count=_parse_positive_int(
+            os.getenv("DATABASE_BACKUP_RETENTION_COUNT", "14"),
+            14,
+        ),
+        database_backup_hour=min(
+            23,
+            max(0, int(os.getenv("DATABASE_BACKUP_HOUR", "3")) if os.getenv("DATABASE_BACKUP_HOUR", "3").isdigit() else 3),
         ),
     )

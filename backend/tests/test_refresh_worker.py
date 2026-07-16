@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time as time_module
 import unittest
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -238,6 +239,69 @@ class ChannelQueueTest(unittest.IsolatedAsyncioTestCase):
             for consumer in consumers:
                 consumer.cancel()
             await asyncio.gather(*consumers, return_exceptions=True)
+
+    async def test_quote_timeout_releases_running_state_and_processes_force_follow_up(self) -> None:
+        manager = BackgroundRefreshManager(
+            60,
+            channel_timeout_seconds={refresh_worker.CHANNEL_QUOTE: 0.01},
+        )
+        manager._queues = {refresh_worker.CHANNEL_QUOTE: asyncio.PriorityQueue()}
+        manager._quote_semaphore = asyncio.Semaphore(1)
+        manager._stop_event = asyncio.Event()
+        calls = 0
+
+        def fake_fetch(_job, _token):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                time_module.sleep(0.05)
+            return {"results": {}, "errors": {}}
+
+        patches = (
+            patch("backend.app.refresh.manager._fetch_channel_payload", side_effect=fake_fetch),
+            patch("backend.app.refresh.manager._mark_job_sync_status"),
+            patch("backend.app.refresh.manager._record_channel_running"),
+            patch("backend.app.refresh.manager._record_job_errors"),
+            patch("backend.app.refresh.manager._record_refresh_failed"),
+            patch("backend.app.refresh.manager._record_refresh_success"),
+            patch("backend.app.refresh.manager._apply_channel_payload"),
+        )
+        mocks = [item.start() for item in patches]
+        consumer = asyncio.create_task(manager._consume_channel(refresh_worker.CHANNEL_QUOTE))
+        try:
+            automatic = RefreshJob(
+                "0050",
+                refresh_worker.CHANNEL_QUOTE,
+                frozenset(("QUOTE",)),
+                PRIORITY_AUTO,
+            )
+            manual = RefreshJob(
+                "0050",
+                refresh_worker.CHANNEL_QUOTE,
+                frozenset(("QUOTE",)),
+                PRIORITY_MANUAL,
+                force_full=True,
+            )
+            await manager._enqueue_job(automatic)
+            for _ in range(20):
+                if (refresh_worker.CHANNEL_QUOTE, "0050") in manager._running_jobs:
+                    break
+                await asyncio.sleep(0.001)
+            await manager._enqueue_job(manual)
+            await asyncio.wait_for(manager._queues[refresh_worker.CHANNEL_QUOTE].join(), timeout=0.5)
+
+            self.assertEqual(calls, 2)
+            self.assertFalse(manager._running_jobs)
+            self.assertFalse(manager._follow_up_jobs)
+            self.assertFalse(manager._channel_runtime[refresh_worker.CHANNEL_QUOTE].current_symbols)
+            self.assertEqual(manager._states["0050"].status, "success")
+            timeout_error = mocks[3].call_args_list[0].args[1]["QUOTE"]
+            self.assertIn("timed out", str(timeout_error))
+        finally:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+            for item in reversed(patches):
+                item.stop()
 
 
 if __name__ == "__main__":

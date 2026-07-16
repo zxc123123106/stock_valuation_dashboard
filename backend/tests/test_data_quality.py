@@ -71,6 +71,23 @@ class DataQualityTest(unittest.TestCase):
             session.commit()
             self.assertEqual(freshness_for_state(session, state, "QUOTE", now=now), "STALE")
 
+    def test_prior_trade_date_quote_is_stale_during_market_even_when_daily_data_lags(self) -> None:
+        now = datetime(2026, 7, 16, 2, 33, tzinfo=UTC)  # 10:33 Asia/Taipei
+        with self.Session() as session:
+            stock = self._stock(session)
+            self._daily(session, stock, date(2026, 7, 15))
+            state = StockDataQualityState(
+                stock_id=stock.id,
+                category="QUOTE",
+                data_date=date(2026, 7, 15),
+                fetched_at=now - timedelta(seconds=10),
+                last_success_at=now - timedelta(seconds=10),
+            )
+            session.add(state)
+            session.commit()
+
+            self.assertEqual(freshness_for_state(session, state, "QUOTE", now=now), "STALE")
+
     def test_pe_uses_previous_trade_date_before_1800(self) -> None:
         with self.Session() as session:
             stock = self._stock(session)

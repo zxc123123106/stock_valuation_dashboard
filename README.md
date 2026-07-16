@@ -130,6 +130,65 @@ python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 
 後端會建立 `data/stock_valuation.sqlite3`。如果本機資料庫是空的，會先建立 `2330` 的初始範例資料。
 
+後端啟動時會先自動執行 Alembic migration，再啟動背景更新 worker。既有資料庫第一次導入 Alembic 時，系統會先建立 `pre-migration` 一致性備份；migration 或完整性檢查失敗時，後端不會帶著不確定的 schema 繼續啟動。
+
+## SQLite、Migration 與備份
+
+每個後端 SQLite connection 都會啟用：
+
+- WAL journal mode
+- `busy_timeout=5000`
+- `foreign_keys=ON`
+- 股票關聯資料的 `ON DELETE CASCADE`
+
+Alembic 預設會在後端啟動時自動升級。也可以在後端停止時手動檢查或升級：
+
+macOS / bash:
+
+```bash
+source .venv/bin/activate
+alembic current
+alembic upgrade head
+```
+
+Windows cmd:
+
+```bat
+.venv\Scripts\activate.bat
+alembic current
+alembic upgrade head
+```
+
+資料庫每天台北時間 `03:00` 使用 SQLite online backup API 建立一致性備份；若後端當時未開啟，會在下一次啟動時補做。預設保留最近 14 份，位置是 `data/backups/`。可在 `.env` 調整：
+
+```env
+DATABASE_BACKUP_DIR=./data/backups
+DATABASE_BACKUP_RETENTION_COUNT=14
+DATABASE_BACKUP_HOUR=3
+```
+
+前端 Toolbar 的「資料管理」可立即備份、下載完整 SQLite，以及匯出／匯入使用者 JSON。使用者 JSON 只包含券商、追蹤清單、順序與成交均價，不包含 API key、行情快取或 AI log。匯入會先顯示新增、保留、刪除與持倉變更，再於確認後建立 `pre-import` 備份並取代目前使用者資料。
+
+### 完整還原 SQLite
+
+完整資料庫不接受從網頁上傳還原。請先停止後端，再保留目前檔案並放回下載的備份。
+
+macOS / bash:
+
+```bash
+mv data/stock_valuation.sqlite3 data/stock_valuation.before-restore.sqlite3
+cp data/backups/<備份檔名>.sqlite3 data/stock_valuation.sqlite3
+```
+
+Windows cmd:
+
+```bat
+move data\stock_valuation.sqlite3 data\stock_valuation.before-restore.sqlite3
+copy data\backups\<備份檔名>.sqlite3 data\stock_valuation.sqlite3
+```
+
+完成後重新啟動後端；啟動流程會再次驗證 migration revision、外鍵與資料庫完整性。
+
 ## 啟動前端
 
 另開一個終端機。
@@ -271,6 +330,13 @@ curl http://127.0.0.1:8000/api/stocks
 - `GET /api/refresh/status`
 - `GET /api/settings/broker`
 - `PUT /api/settings/broker`
+- `GET /api/data-management/status`
+- `GET /api/data-management/backups`
+- `POST /api/data-management/backups`
+- `GET /api/data-management/backups/{filename}`
+- `GET /api/data-management/export`
+- `POST /api/data-management/import/preview`
+- `POST /api/data-management/import`
 - `POST /api/stocks/refresh`
 - `POST /api/stocks/{symbol}/refresh`
 - `POST /api/stocks/reorder`
@@ -357,5 +423,6 @@ npm run build
 - `frontend/.env`
 - `.venv/`
 - `data/*.sqlite3`
+- `data/backups/`
 
-本機開發使用 SQLite。PostgreSQL、Docker、雲端部署與跨裝置 hosting 目前都不在範圍內。
+本機開發使用 SQLite。當追蹤標的長期超過約 50～100 檔或開始支援多使用者時，再評估 PostgreSQL；Docker、雲端部署與跨裝置 hosting 目前不在範圍內。

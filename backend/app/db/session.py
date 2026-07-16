@@ -76,5 +76,12 @@ def ping_database() -> bool:
     return True
 
 
+def database_file_path() -> Path | None:
+    url = make_url(DATABASE_URL)
+    if not url.database or url.database == ":memory:":
+        return None
+    return Path(url.database).expanduser().resolve()
+
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]

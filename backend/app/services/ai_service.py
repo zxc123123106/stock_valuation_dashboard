@@ -5,6 +5,7 @@ service boundary; routers and new tests should import from here.
 """
 
 from .application import (
+    AI_ANALYSIS_JOB_LOCK,
     _ai_analysis_batch_response,
     _ai_analysis_result_response,
     _ai_feedback_record,
@@ -18,5 +19,13 @@ from .application import (
     _rule_based_result_response,
     _run_ai_analysis_job,
 )
+
+
+def acquire_ai_analysis_job_lock() -> None:
+    AI_ANALYSIS_JOB_LOCK.acquire()
+
+
+def release_ai_analysis_job_lock() -> None:
+    AI_ANALYSIS_JOB_LOCK.release()
 
 __all__ = [name for name in globals() if not name.startswith("__")]
